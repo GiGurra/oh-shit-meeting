@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -27,6 +28,7 @@ type Params struct {
 
 type ListEventsParams struct {
 	Backend string `descr:"Calendar backend to use" default:"auto" alts:"auto,gws,gog"`
+	Json    bool   `descr:"Output as JSON" default:"false"`
 }
 
 func main() {
@@ -45,6 +47,12 @@ func main() {
 					events := calendar.Poll(params.Backend)
 					if len(events) == 0 {
 						fmt.Println("No upcoming events found.")
+						return
+					}
+					if params.Json {
+						enc := json.NewEncoder(os.Stdout)
+						enc.SetIndent("", "  ")
+						enc.Encode(events)
 						return
 					}
 					for _, e := range events {
