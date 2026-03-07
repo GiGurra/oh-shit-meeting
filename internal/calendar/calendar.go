@@ -13,10 +13,12 @@ type Fetcher interface {
 }
 
 // DefaultFetcher picks gws if available, otherwise falls back to gog
-type DefaultFetcher struct{}
+type DefaultFetcher struct {
+	Backend string
+}
 
 func (f *DefaultFetcher) FetchEvents(from, to string) ([]Event, error) {
-	return FetchEvents(from, to)
+	return FetchEvents(from, to, f.Backend)
 }
 
 type Event struct {
@@ -52,21 +54,28 @@ type ReminderOverride struct {
 	Minutes int    `json:"minutes"`
 }
 
-func FetchEvents(from, to string) ([]Event, error) {
-	if _, err := exec.LookPath("gws"); err == nil {
+func FetchEvents(from, to, backend string) ([]Event, error) {
+	switch backend {
+	case "gws":
 		return fetchEventsGWS(from, to)
+	case "gog":
+		return fetchEventsGog(from, to)
+	default: // "auto" or empty
+		if _, err := exec.LookPath("gws"); err == nil {
+			return fetchEventsGWS(from, to)
+		}
+		slog.Info("gws not found, falling back to gog")
+		return fetchEventsGog(from, to)
 	}
-	slog.Info("gws not found, falling back to gog")
-	return fetchEventsGog(from, to)
 }
 
 // Poll fetches events from Google Calendar and returns valid events only
-func Poll() []Event {
+func Poll(backend string) []Event {
 	now := time.Now()
 	from := now.Add(-1 * time.Hour).Format(time.RFC3339)
 	to := now.Add(72 * time.Hour).Format(time.RFC3339)
 
-	events, err := FetchEvents(from, to)
+	events, err := FetchEvents(from, to, backend)
 	if err != nil {
 		slog.Error("Failed to fetch calendar events", "error", err)
 		return nil

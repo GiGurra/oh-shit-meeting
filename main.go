@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -21,17 +22,42 @@ type Params struct {
 	WarnBefore   time.Duration `descr:"Global alert time before meeting" default:"5m"`
 	Sound        string        `descr:"Alert sound (none, or system sound name like Glass, Hero, Funk)" default:"Hero"`
 	Fullscreen   bool          `descr:"Show alerts in fullscreen mode for maximum obnoxiousness" default:"false"`
+	Backend      string        `descr:"Calendar backend to use" default:"auto" alts:"auto,gws,gog"`
+}
+
+type ListEventsParams struct {
+	Backend string `descr:"Calendar backend to use" default:"auto" alts:"auto,gws,gog"`
 }
 
 func main() {
 	boa.CmdT[Params]{
-		Use:         "oh-shit-meeting",
-		Short:       "Calendar reminder daemon",
-		Long:        "Monitors your calendar and displays warnings when meetings are about to start",
-		ParamEnrich: boa.ParamEnricherCombine(boa.ParamEnricherName, boa.ParamEnricherShort, boa.ParamEnricherBool),
+		Use:   "oh-shit-meeting",
+		Short: "Calendar reminder daemon",
+		Long:  "Monitors your calendar and displays warnings when meetings are about to start",
 		RunFunc: func(params *Params, cmd *cobra.Command, args []string) {
 			run(params)
 		},
+		SubCmds: boa.SubCmds(
+			boa.CmdT[ListEventsParams]{
+				Use:   "list-events",
+				Short: "List upcoming calendar events (live integration test)",
+				RunFunc: func(params *ListEventsParams, cmd *cobra.Command, args []string) {
+					events := calendar.Poll(params.Backend)
+					if len(events) == 0 {
+						fmt.Println("No upcoming events found.")
+						return
+					}
+					for _, e := range events {
+						start, _ := time.Parse(time.RFC3339, e.Start.DateTime)
+						fmt.Printf("  %s  %-40s  %s\n",
+							start.Local().Format("Mon 02 Jan 15:04"),
+							e.Summary,
+							e.Location,
+						)
+					}
+				},
+			},
+		),
 	}.Run()
 }
 
@@ -77,7 +103,7 @@ func runLoop(params *Params) {
 	for range ticker.C {
 		// Poll Google if needed
 		if time.Since(lastPoll) >= params.PollInterval {
-			events = calendar.Poll()
+			events = calendar.Poll(params.Backend)
 			lastPoll = time.Now()
 		}
 
