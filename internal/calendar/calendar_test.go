@@ -96,7 +96,7 @@ func TestEvent_AllDayEvent(t *testing.T) {
 	}
 }
 
-func TestResponse_JSONUnmarshal(t *testing.T) {
+func TestGogResponse_JSONUnmarshal(t *testing.T) {
 	jsonData := `{
 		"events": [
 			{
@@ -120,7 +120,7 @@ func TestResponse_JSONUnmarshal(t *testing.T) {
 		]
 	}`
 
-	var response Response
+	var response gogResponse
 	err := json.Unmarshal([]byte(jsonData), &response)
 	if err != nil {
 		t.Fatalf("Failed to unmarshal response: %v", err)
@@ -131,6 +131,35 @@ func TestResponse_JSONUnmarshal(t *testing.T) {
 	}
 	if response.Events[0].Summary != "Meeting 1" {
 		t.Errorf("expected first event to be 'Meeting 1', got %s", response.Events[0].Summary)
+	}
+}
+
+func TestGwsResponse_JSONUnmarshal(t *testing.T) {
+	jsonData := `{
+		"items": [
+			{
+				"id": "evt1",
+				"summary": "Meeting 1",
+				"start": {"dateTime": "2026-02-04T09:00:00Z"},
+				"end": {"dateTime": "2026-02-04T10:00:00Z"},
+				"eventType": "default",
+				"status": "confirmed",
+				"reminders": {"useDefault": true}
+			}
+		]
+	}`
+
+	var response gwsResponse
+	err := json.Unmarshal([]byte(jsonData), &response)
+	if err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
+
+	if len(response.Items) != 1 {
+		t.Errorf("expected 1 event, got %d", len(response.Items))
+	}
+	if response.Items[0].Summary != "Meeting 1" {
+		t.Errorf("expected first event to be 'Meeting 1', got %s", response.Items[0].Summary)
 	}
 }
 
