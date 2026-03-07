@@ -1,9 +1,6 @@
 package calendar
 
 import (
-	"encoding/json"
-	"errors"
-	"fmt"
 	"log/slog"
 	"os/exec"
 	"sort"
@@ -15,15 +12,11 @@ type Fetcher interface {
 	FetchEvents(from, to string) ([]Event, error)
 }
 
-// DefaultFetcher fetches events using the gog CLI
+// DefaultFetcher picks gws if available, otherwise falls back to gog
 type DefaultFetcher struct{}
 
 func (f *DefaultFetcher) FetchEvents(from, to string) ([]Event, error) {
 	return FetchEvents(from, to)
-}
-
-type Response struct {
-	Events []Event `json:"events"`
 }
 
 type Event struct {
@@ -60,28 +53,11 @@ type ReminderOverride struct {
 }
 
 func FetchEvents(from, to string) ([]Event, error) {
-	cmd := exec.Command("gog", "calendar", "list",
-		"--from="+from,
-		"--to="+to,
-		"--all",
-		"--json",
-	)
-
-	output, err := cmd.Output()
-	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return nil, fmt.Errorf("gog command failed: %w, stderr: %s", err, string(exitErr.Stderr))
-		}
-		return nil, fmt.Errorf("failed to run gog command: %w", err)
+	if _, err := exec.LookPath("gws"); err == nil {
+		return fetchEventsGWS(from, to)
 	}
-
-	var response Response
-	if err := json.Unmarshal(output, &response); err != nil {
-		return nil, fmt.Errorf("failed to parse calendar response: %w", err)
-	}
-
-	return response.Events, nil
+	slog.Info("gws not found, falling back to gog")
+	return fetchEventsGog(from, to)
 }
 
 // Poll fetches events from Google Calendar and returns valid events only
