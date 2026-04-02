@@ -160,23 +160,37 @@ const maxTokenAge = 4 * 24 * time.Hour
 // ReAuthIfStale checks if the token is older than 4 days and triggers
 // a browser re-auth if so. Returns true if re-auth was performed.
 func ReAuthIfStale() bool {
+	slog.Info("Checking auth status...")
+
 	age := TokenAge()
-	if age == 0 || age < maxTokenAge {
+	if age == 0 {
+		slog.Info("Auth age unknown (no timestamp recorded)")
 		return false
 	}
+
+	slog.Info("Checking if browser re-auth needed",
+		"lastAuth", age.Round(time.Minute).String()+" ago",
+		"maxAge", maxTokenAge.String())
+
+	if age < maxTokenAge {
+		slog.Info("No browser re-auth needed, token is fresh enough")
+		return false
+	}
+
 	if !HasGoogleCredentials() {
 		slog.Error("Token is stale but no credentials stored — run 'oh-shit-meeting auth'",
 			"age", age.Round(time.Hour))
 		return false
 	}
-	slog.Warn("Token is stale, triggering re-authentication",
+
+	slog.Warn("Token is stale, need to re-auth in browser",
 		"age", age.Round(time.Hour),
 		"maxAge", maxTokenAge)
 	if err := ReAuthenticate(); err != nil {
-		slog.Error("Re-authentication failed", "error", err)
+		slog.Error("Browser re-authentication failed", "error", err)
 		return false
 	}
-	slog.Info("Re-authentication successful")
+	slog.Info("Browser re-authentication successful")
 	return true
 }
 
@@ -377,6 +391,14 @@ func newGoogleService() (*gcal.Service, error) {
 		return nil, fmt.Errorf("no saved token — run 'oh-shit-meeting auth' first: %w", err)
 	}
 
+	if tok.Expiry.IsZero() {
+		slog.Info("Access token has no expiry set")
+	} else if tok.Expiry.After(time.Now()) {
+		slog.Info("Access token is valid", "expiresIn", time.Until(tok.Expiry).Round(time.Second))
+	} else {
+		slog.Info("Access token expired, attempting refresh", "expiredAgo", time.Since(tok.Expiry).Round(time.Second))
+	}
+
 	// Create a token source that auto-refreshes
 	src := oauthCfg.TokenSource(context.Background(), tok)
 	newTok, err := src.Token()
@@ -384,9 +406,12 @@ func newGoogleService() (*gcal.Service, error) {
 		return nil, fmt.Errorf("token refresh failed — run 'oh-shit-meeting auth' to re-authenticate: %w", err)
 	}
 	if newTok.AccessToken != tok.AccessToken {
+		slog.Info("Access token was refreshed, persisting new token")
 		if err := saveToken(newTok); err != nil {
 			slog.Error("Failed to persist refreshed token", "error", err)
 		}
+	} else {
+		slog.Info("Access token still valid, no refresh needed")
 	}
 
 	client := oauth2.NewClient(context.Background(), src)
