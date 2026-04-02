@@ -27,12 +27,14 @@ type Params struct {
 	WarnBefore   time.Duration `descr:"Global alert time before meeting" default:"5m"`
 	Sound        string        `descr:"Alert sound (none, or system sound name like Glass, Hero, Funk)" default:"Hero"`
 	Fullscreen   bool          `descr:"Show alerts in fullscreen mode for maximum obnoxiousness" default:"false"`
-	Backend      string        `descr:"Calendar backend to use" default:"auto" alts:"auto,google,gws,gog"`
+	Backend       string        `descr:"Calendar backend to use" default:"auto" alts:"auto,google,gws,gog"`
+	LookaheadDays int           `descr:"How many days ahead to look for events" default:"3"`
 }
 
 type ListEventsParams struct {
-	Backend string `descr:"Calendar backend to use" default:"auto" alts:"auto,google,gws,gog"`
-	Json    bool   `descr:"Output as JSON" default:"false"`
+	Backend       string `descr:"Calendar backend to use" default:"auto" alts:"auto,google,gws,gog"`
+	Json          bool   `descr:"Output as JSON" default:"false"`
+	LookaheadDays int    `descr:"How many days ahead to look for events" default:"3"`
 }
 
 type AuthParams struct {
@@ -171,7 +173,7 @@ To get a credentials file:
 				Use:   "list-events",
 				Short: "List upcoming calendar events (live integration test)",
 				RunFunc: func(params *ListEventsParams, cmd *cobra.Command, args []string) {
-					events := calendar.Poll(params.Backend)
+					events := calendar.Poll(params.Backend, params.LookaheadDays)
 					if len(events) == 0 {
 						fmt.Println("No upcoming events found.")
 						return
@@ -238,7 +240,7 @@ func runLoop(params *Params) {
 	for range ticker.C {
 		// Poll Google if needed
 		if time.Since(lastPoll) >= params.PollInterval {
-			events = calendar.Poll(params.Backend)
+			events = calendar.Poll(params.Backend, params.LookaheadDays)
 			lastPoll = time.Now()
 		}
 

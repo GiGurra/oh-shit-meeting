@@ -80,11 +80,15 @@ func FetchEvents(from, to, backend string) ([]Event, error) {
 	}
 }
 
-// Poll fetches events from Google Calendar and returns valid events only
-func Poll(backend string) []Event {
+// Poll fetches events from Google Calendar and returns valid events only.
+// lookaheadDays controls how far ahead to look (0 defaults to 3 days).
+func Poll(backend string, lookaheadDays int) []Event {
+	if lookaheadDays <= 0 {
+		lookaheadDays = 3
+	}
 	now := time.Now()
 	from := now.Add(-1 * time.Hour).Format(time.RFC3339)
-	to := now.Add(72 * time.Hour).Format(time.RFC3339)
+	to := now.Add(time.Duration(lookaheadDays) * 24 * time.Hour).Format(time.RFC3339)
 
 	events, err := FetchEvents(from, to, backend)
 	if err != nil {
