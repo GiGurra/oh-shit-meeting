@@ -218,6 +218,24 @@ func run(params *Params) {
 		"warnBefore", params.WarnBefore,
 	)
 
+	// Log auth status at startup
+	status := calendar.GetTokenStatus()
+	if status.HasToken {
+		if status.AuthenticatedAt.IsZero() {
+			slog.Info("Google auth: token found, auth time unknown")
+		} else {
+			age := time.Since(status.AuthenticatedAt).Round(time.Minute)
+			slog.Info("Google auth: token found",
+				"authenticatedAt", status.AuthenticatedAt.Local().Format("2006-01-02 15:04"),
+				"age", age,
+				"hasRefreshToken", status.HasRefreshToken)
+		}
+	} else if status.HasCredentials {
+		slog.Info("Google auth: credentials stored but no token — will authenticate on first poll")
+	} else {
+		slog.Warn("Google auth: not configured — run 'oh-shit-meeting auth'")
+	}
+
 	// Re-auth before starting if token is stale
 	calendar.ReAuthIfStale()
 
