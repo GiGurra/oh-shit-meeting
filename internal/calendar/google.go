@@ -3,6 +3,7 @@ package calendar
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -17,6 +18,7 @@ import (
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	gcal "google.golang.org/api/calendar/v3"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 )
 
@@ -43,6 +45,7 @@ const keyringClientSecretUser = "google-client-secret"
 
 type appConfig struct {
 	GoogleClientID string `json:"google_client_id,omitempty"`
+	AuthenticatedAt string `json:"authenticated_at,omitempty"` // RFC3339
 }
 
 func loadAppConfig() appConfig {
@@ -136,6 +139,20 @@ type TokenStatus struct {
 	HasRefreshToken bool
 	HasCredentials  bool
 	ClientID        string
+	AuthenticatedAt time.Time
+}
+
+// TokenAge returns how long ago the last authentication was, or zero if unknown.
+func TokenAge() time.Duration {
+	cfg := loadAppConfig()
+	if cfg.AuthenticatedAt == "" {
+		return 0
+	}
+	t, err := time.Parse(time.RFC3339, cfg.AuthenticatedAt)
+	if err != nil {
+		return 0
+	}
+	return time.Since(t)
 }
 
 // GetTokenStatus returns the current authentication status.
@@ -158,6 +175,11 @@ func GetTokenStatus() TokenStatus {
 			status.ClientID = cfg.GoogleClientID
 		}
 	}
+	if cfg.AuthenticatedAt != "" {
+		if t, err := time.Parse(time.RFC3339, cfg.AuthenticatedAt); err == nil {
+			status.AuthenticatedAt = t
+		}
+	}
 
 	return status
 }
@@ -178,7 +200,15 @@ func ReAuthenticate() error {
 	if err != nil {
 		return err
 	}
-	return doBrowserAuth(oauthCfg)
+	if err := doBrowserAuth(oauthCfg); err != nil {
+		return err
+	}
+	cfg := loadAppConfig()
+	cfg.AuthenticatedAt = time.Now().Format(time.RFC3339)
+	if err := saveAppConfig(cfg); err != nil {
+		slog.Warn("Could not save auth timestamp", "error", err)
+	}
+	return nil
 }
 
 // Authenticate runs the OAuth2 authorization code flow using a credentials JSON file.
@@ -199,6 +229,7 @@ func Authenticate(credentialsPath string) error {
 	}
 	cfg := loadAppConfig()
 	cfg.GoogleClientID = oauthCfg.ClientID
+	cfg.AuthenticatedAt = time.Now().Format(time.RFC3339)
 	if err := saveAppConfig(cfg); err != nil {
 		slog.Warn("Could not save config", "error", err)
 	}
@@ -221,6 +252,7 @@ func AuthenticateWithClientIDSecret(clientID, clientSecret string) error {
 	// Save client ID to config (not secret — it's in keychain)
 	cfg := loadAppConfig()
 	cfg.GoogleClientID = clientID
+	cfg.AuthenticatedAt = time.Now().Format(time.RFC3339)
 	if err := saveAppConfig(cfg); err != nil {
 		slog.Warn("Could not save config", "error", err)
 	}
@@ -340,6 +372,20 @@ func newGoogleService() (*gcal.Service, error) {
 }
 
 func fetchEventsGoogle(from, to string) ([]Event, error) {
+	events, err := doFetchEventsGoogle(from, to)
+	if err != nil && isUnauthorized(err) {
+		slog.Warn("Google API returned 401, attempting re-authentication")
+		if reAuthErr := ReAuthenticate(); reAuthErr != nil {
+			slog.Error("Re-authentication failed", "error", reAuthErr)
+			return nil, fmt.Errorf("unauthorized and re-auth failed: %w (original: %v)", reAuthErr, err)
+		}
+		slog.Info("Re-authentication successful, retrying fetch")
+		return doFetchEventsGoogle(from, to)
+	}
+	return events, err
+}
+
+func doFetchEventsGoogle(from, to string) ([]Event, error) {
 	svc, err := newGoogleService()
 	if err != nil {
 		return nil, err
@@ -361,6 +407,15 @@ func fetchEventsGoogle(from, to string) ([]Event, error) {
 		allEvents = append(allEvents, events...)
 	}
 	return allEvents, nil
+}
+
+// isUnauthorized checks if an error is a Google API 401 response.
+func isUnauthorized(err error) bool {
+	var apiErr *googleapi.Error
+	if errors.As(err, &apiErr) {
+		return apiErr.Code == 401
+	}
+	return false
 }
 
 func fetchGoogleCalendarEvents(svc *gcal.Service, calendarID, from, to string) ([]Event, error) {

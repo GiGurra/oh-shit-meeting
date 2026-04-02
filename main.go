@@ -138,6 +138,15 @@ To get a credentials file:
 								fmt.Println("Access token: expired (will auto-refresh on next use)")
 							}
 						}
+						if !status.AuthenticatedAt.IsZero() {
+							age := time.Since(status.AuthenticatedAt).Round(time.Minute)
+							fmt.Printf("Authenticated: %s (%s ago)\n",
+								status.AuthenticatedAt.Local().Format("2006-01-02 15:04"),
+								age)
+							if age > 4*24*time.Hour {
+								fmt.Println("Warning: refresh token may expire soon — consider running 'oh-shit-meeting auth'")
+							}
+						}
 					} else {
 						fmt.Println("Token: not found")
 					}
