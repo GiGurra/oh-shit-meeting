@@ -190,6 +190,25 @@ func HasGoogleCredentials() bool {
 	return false
 }
 
+// HasStoredClientCredentials returns true if client ID + secret are saved from a previous auth.
+func HasStoredClientCredentials() bool {
+	cfg := loadAppConfig()
+	if cfg.GoogleClientID == "" {
+		return false
+	}
+	secret, err := keyring.Get(keyringService, keyringClientSecretUser)
+	return err == nil && secret != ""
+}
+
+// ReAuthenticate re-runs the OAuth2 flow using previously stored credentials.
+func ReAuthenticate() error {
+	oauthCfg, err := resolveOAuthConfig()
+	if err != nil {
+		return err
+	}
+	return doBrowserAuth(oauthCfg)
+}
+
 // Authenticate runs the OAuth2 authorization code flow using a credentials JSON file.
 func Authenticate(credentialsPath string) error {
 	oauthCfg, err := loadCredentials(credentialsPath)

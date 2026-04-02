@@ -82,8 +82,17 @@ To get a credentials file:
 					if credPath == "" {
 						credPath = calendar.GoogleCredentialsPath()
 					}
+					// If no credentials file, try stored client ID + secret
 					if credPath == "" {
-						fmt.Fprintln(os.Stderr, "Error: provide --credentials <file> or use --interactive to enter credentials")
+						if calendar.HasStoredClientCredentials() {
+							if err := calendar.ReAuthenticate(); err != nil {
+								fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+								os.Exit(1)
+							}
+							fmt.Println("Authenticated successfully.")
+							return
+						}
+						fmt.Fprintln(os.Stderr, "Error: no stored credentials found")
 						fmt.Fprintln(os.Stderr, "")
 						fmt.Fprintln(os.Stderr, "Usage:")
 						fmt.Fprintln(os.Stderr, "  oh-shit-meeting auth --credentials /path/to/credentials.json")
