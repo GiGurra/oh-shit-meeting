@@ -360,7 +360,7 @@ func newGoogleService() (*gcal.Service, error) {
 	}
 	if newTok.AccessToken != tok.AccessToken {
 		if err := saveToken(newTok); err != nil {
-			slog.Warn("Failed to persist refreshed token", "error", err)
+			slog.Error("Failed to persist refreshed token", "error", err)
 		}
 	}
 
