@@ -1,6 +1,7 @@
 package calendar
 
 import (
+	"fmt"
 	"log/slog"
 	"os/exec"
 	"sort"
@@ -18,7 +19,8 @@ type DefaultFetcher struct {
 }
 
 func (f *DefaultFetcher) FetchEvents(from, to string) ([]Event, error) {
-	return FetchEvents(from, to, f.Backend)
+	events, _, err := FetchEvents(from, to, f.Backend)
+	return events, err
 }
 
 type Event struct {
@@ -54,28 +56,48 @@ type ReminderOverride struct {
 	Minutes int    `json:"minutes"`
 }
 
-func FetchEvents(from, to, backend string) ([]Event, error) {
+// FetchEvents returns events and the name of the backend that was used.
+func FetchEvents(from, to, backend string) ([]Event, string, error) {
 	switch backend {
+	case "google":
+		events, err := fetchEventsGoogle(from, to)
+		return events, "gcal-native", err
 	case "gws":
-		return fetchEventsGWS(from, to)
+		events, err := fetchEventsGWS(from, to)
+		return events, "gws", err
 	case "gog":
-		return fetchEventsGog(from, to)
+		events, err := fetchEventsGog(from, to)
+		return events, "gogcli", err
 	default: // "auto" or empty
-		if _, err := exec.LookPath("gws"); err == nil {
-			return fetchEventsGWS(from, to)
+		// Prefer native Google API if authenticated
+		if HasGoogleToken() && HasGoogleCredentials() {
+			events, err := fetchEventsGoogle(from, to)
+			return events, "gcal-native", err
 		}
-		slog.Info("gws not found, falling back to gog")
-		return fetchEventsGog(from, to)
+		// Fall back to CLI tools
+		if _, err := exec.LookPath("gws"); err == nil {
+			events, err := fetchEventsGWS(from, to)
+			return events, "gws", err
+		}
+		if _, err := exec.LookPath("gog"); err == nil {
+			events, err := fetchEventsGog(from, to)
+			return events, "gogcli", err
+		}
+		return nil, "", fmt.Errorf("no calendar backend available — run 'oh-shit-meeting auth --credentials <file>' or install gws/gog")
 	}
 }
 
-// Poll fetches events from Google Calendar and returns valid events only
-func Poll(backend string) []Event {
+// Poll fetches events from Google Calendar and returns valid events only.
+// lookaheadDays controls how far ahead to look (0 defaults to 3 days).
+func Poll(backend string, lookaheadDays int) []Event {
+	if lookaheadDays <= 0 {
+		lookaheadDays = 3
+	}
 	now := time.Now()
 	from := now.Add(-1 * time.Hour).Format(time.RFC3339)
-	to := now.Add(72 * time.Hour).Format(time.RFC3339)
+	to := now.Add(time.Duration(lookaheadDays) * 24 * time.Hour).Format(time.RFC3339)
 
-	events, err := FetchEvents(from, to, backend)
+	events, usedBackend, err := FetchEvents(from, to, backend)
 	if err != nil {
 		slog.Error("Failed to fetch calendar events", "error", err)
 		return nil
@@ -108,6 +130,6 @@ func Poll(backend string) []Event {
 		return ti.Before(tj)
 	})
 
-	slog.Info("Polled Google Calendar", "eventCount", len(validEvents))
+	slog.Info("Polled Google Calendar", "backend", usedBackend, "eventCount", len(validEvents))
 	return validEvents
 }
