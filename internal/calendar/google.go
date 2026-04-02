@@ -169,7 +169,7 @@ func ReAuthIfStale() bool {
 	}
 
 	slog.Info("Checking if browser re-auth needed",
-		"lastAuth", age.Round(time.Minute).String()+" ago",
+		"lastAuth", age.Round(time.Second).String()+" ago",
 		"maxAge", maxTokenAge.String())
 
 	if age < maxTokenAge {
