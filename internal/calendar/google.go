@@ -359,7 +359,9 @@ func newGoogleService() (*gcal.Service, error) {
 		return nil, fmt.Errorf("token refresh failed — run 'oh-shit-meeting auth' to re-authenticate: %w", err)
 	}
 	if newTok.AccessToken != tok.AccessToken {
-		saveToken(newTok)
+		if err := saveToken(newTok); err != nil {
+			slog.Warn("Failed to persist refreshed token", "error", err)
+		}
 	}
 
 	client := oauth2.NewClient(context.Background(), src)
