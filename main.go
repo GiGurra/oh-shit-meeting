@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -46,11 +47,19 @@ type StatusParams struct{}
 
 type LogoutParams struct{}
 
+func getVersion() string {
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" {
+		return info.Main.Version
+	}
+	return "dev"
+}
+
 func main() {
 	boa.CmdT[Params]{
-		Use:   "oh-shit-meeting",
-		Short: "Calendar reminder daemon",
-		Long:  "Monitors your calendar and displays warnings when meetings are about to start",
+		Use:     "oh-shit-meeting",
+		Short:   "Calendar reminder daemon",
+		Long:    "Monitors your calendar and displays warnings when meetings are about to start",
+		Version: getVersion(),
 		RunFunc: func(params *Params, cmd *cobra.Command, args []string) {
 			run(params)
 		},
