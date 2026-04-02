@@ -155,6 +155,31 @@ func TokenAge() time.Duration {
 	return time.Since(t)
 }
 
+const maxTokenAge = 4 * 24 * time.Hour
+
+// ReAuthIfStale checks if the token is older than 4 days and triggers
+// a browser re-auth if so. Returns true if re-auth was performed.
+func ReAuthIfStale() bool {
+	age := TokenAge()
+	if age == 0 || age < maxTokenAge {
+		return false
+	}
+	if !HasGoogleCredentials() {
+		slog.Error("Token is stale but no credentials stored — run 'oh-shit-meeting auth'",
+			"age", age.Round(time.Hour))
+		return false
+	}
+	slog.Warn("Token is stale, triggering re-authentication",
+		"age", age.Round(time.Hour),
+		"maxAge", maxTokenAge)
+	if err := ReAuthenticate(); err != nil {
+		slog.Error("Re-authentication failed", "error", err)
+		return false
+	}
+	slog.Info("Re-authentication successful")
+	return true
+}
+
 // GetTokenStatus returns the current authentication status.
 func GetTokenStatus() TokenStatus {
 	status := TokenStatus{}

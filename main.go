@@ -218,6 +218,9 @@ func run(params *Params) {
 		"warnBefore", params.WarnBefore,
 	)
 
+	// Re-auth before starting if token is stale
+	calendar.ReAuthIfStale()
+
 	gui.Init()
 	go runLoop(params)
 	gui.Run()
@@ -240,6 +243,7 @@ func runLoop(params *Params) {
 	for range ticker.C {
 		// Poll Google if needed
 		if time.Since(lastPoll) >= params.PollInterval {
+			calendar.ReAuthIfStale()
 			events = calendar.Poll(params.Backend, params.LookaheadDays)
 			lastPoll = time.Now()
 		}
