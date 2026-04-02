@@ -19,7 +19,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, windows-11-arm, macos-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        # windows disabled: Fyne/GL dependencies don't build on Windows CI
+        # os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, windows-11-arm, macos-latest]
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -88,12 +90,13 @@ jobs:
           - os: macos-latest
             goos: darwin
             goarch: arm64
-          - os: windows-latest
-            goos: windows
-            goarch: amd64
-          - os: windows-11-arm
-            goos: windows
-            goarch: arm64
+          # windows disabled: Fyne/GL dependencies don't build on Windows CI
+          # - os: windows-latest
+          #   goos: windows
+          #   goarch: amd64
+          # - os: windows-11-arm
+          #   goos: windows
+          #   goarch: arm64
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -148,13 +151,9 @@ jobs:
           cd dist
           for dir in */; do
             name="${dir%/}"
-            if [[ "$name" == *"windows"* ]]; then
-              zip -r "${name}.zip" "$dir"
-            else
-              tar -czvf "${name}.tar.gz" "$dir"
-            fi
+            tar -czvf "${name}.tar.gz" "$dir"
           done
-          sha256sum *.tar.gz *.zip > checksums.txt
+          sha256sum *.tar.gz > checksums.txt
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -162,7 +161,6 @@ jobs:
           tag_name: ${{ needs.version.outputs.new_version }}
           files: |
             dist/*.tar.gz
-            dist/*.zip
             dist/checksums.txt
           generate_release_notes: true
         env:

@@ -5,11 +5,9 @@ before:
     - go mod tidy
 
 builds:
-  - env:
-      - CGO_ENABLED=1
-    goos:
+  - goos:
       - linux
-      - windows
+      # - windows  # disabled: Fyne/GL deps don't build on Windows CI
       - darwin
     goarch:
       - amd64
@@ -25,9 +23,6 @@ archives:
       {{- .Version }}_
       {{- .Os }}_
       {{- .Arch }}
-    format_overrides:
-      - goos: windows
-        format: zip
 
 checksum:
   name_template: 'checksums.txt'
