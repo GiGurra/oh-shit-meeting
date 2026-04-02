@@ -173,6 +173,7 @@ To get a credentials file:
 				Use:   "list-events",
 				Short: "List upcoming calendar events (live integration test)",
 				RunFunc: func(params *ListEventsParams, cmd *cobra.Command, args []string) {
+					calendar.ReAuthIfStale()
 					events := calendar.Poll(params.Backend, params.LookaheadDays)
 					if len(events) == 0 {
 						fmt.Println("No upcoming events found.")
