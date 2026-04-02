@@ -122,14 +122,17 @@ To get a credentials file:
 					}
 
 					if status.HasToken {
-						fmt.Printf("Token: stored in system keychain\n")
-						fmt.Printf("Token type: %s\n", status.TokenType)
+						fmt.Println("Token: stored in system keychain")
+						if status.HasRefreshToken {
+							fmt.Println("Refresh token: yes (token auto-renews)")
+						} else {
+							fmt.Println("Refresh token: no (re-auth needed when access token expires)")
+						}
 						if !status.Expiry.IsZero() {
-							fmt.Printf("Expires: %s\n", status.Expiry.Local().Format("2006-01-02 15:04:05"))
 							if status.Expiry.After(time.Now()) {
-								fmt.Printf("Status: valid (expires in %s)\n", time.Until(status.Expiry).Round(time.Second))
+								fmt.Printf("Access token: valid (expires in %s)\n", time.Until(status.Expiry).Round(time.Second))
 							} else {
-								fmt.Println("Status: expired (will auto-refresh on next use)")
+								fmt.Println("Access token: expired (will auto-refresh on next use)")
 							}
 						}
 					} else {

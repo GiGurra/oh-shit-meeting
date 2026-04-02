@@ -139,12 +139,13 @@ func GoogleCredentialsPath() string {
 
 // TokenStatus contains information about the stored OAuth token.
 type TokenStatus struct {
-	HasToken       bool
-	TokenType      string
-	Expiry         time.Time
-	HasCredentials bool
-	CredentialType string // "file" or "client_id"
-	CredentialInfo string // file path or client ID
+	HasToken        bool
+	TokenType       string
+	Expiry          time.Time
+	HasRefreshToken bool
+	HasCredentials  bool
+	CredentialType  string // "file" or "client_id"
+	CredentialInfo  string // file path or client ID
 }
 
 // GetTokenStatus returns the current authentication status.
@@ -156,6 +157,7 @@ func GetTokenStatus() TokenStatus {
 		status.HasToken = true
 		status.TokenType = tok.TokenType
 		status.Expiry = tok.Expiry
+		status.HasRefreshToken = tok.RefreshToken != ""
 	}
 
 	cfg := loadAppConfig()
