@@ -113,6 +113,7 @@ oh-shit-meeting &; disown
 | `--warn-before` | `5m` | Global reminder time before meetings |
 | `--sound` | `Hero` | Alert sound (macOS: Glass, Hero, Funk, etc. or `none`) |
 | `--backend` | `auto` | Calendar backend: `auto`, `google`, `gws`, or `gog` |
+| `--lookahead-days` | `3` | How many days ahead to look for events |
 
 ## How It Works
 
