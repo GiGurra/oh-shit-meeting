@@ -4,7 +4,7 @@ go 1.26
 
 require (
 	fyne.io/fyne/v2 v2.7.3
-	github.com/GiGurra/boa v0.4.3
+	github.com/GiGurra/boa v1.0.1
 	github.com/gofrs/flock v0.13.0
 	github.com/gopxl/beep/v2 v2.1.1
 	github.com/spf13/cobra v1.10.2
