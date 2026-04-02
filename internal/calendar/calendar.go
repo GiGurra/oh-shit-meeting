@@ -1,6 +1,7 @@
 package calendar
 
 import (
+	"fmt"
 	"log/slog"
 	"os/exec"
 	"sort"
@@ -56,16 +57,26 @@ type ReminderOverride struct {
 
 func FetchEvents(from, to, backend string) ([]Event, error) {
 	switch backend {
+	case "google":
+		return fetchEventsGoogle(from, to)
 	case "gws":
 		return fetchEventsGWS(from, to)
 	case "gog":
 		return fetchEventsGog(from, to)
 	default: // "auto" or empty
+		// Prefer native Google API if authenticated
+		if HasGoogleToken() && HasGoogleCredentials() {
+			return fetchEventsGoogle(from, to)
+		}
+		// Fall back to CLI tools
 		if _, err := exec.LookPath("gws"); err == nil {
 			return fetchEventsGWS(from, to)
 		}
-		slog.Info("gws not found, falling back to gog")
-		return fetchEventsGog(from, to)
+		if _, err := exec.LookPath("gog"); err == nil {
+			slog.Info("gws not found, falling back to gog")
+			return fetchEventsGog(from, to)
+		}
+		return nil, fmt.Errorf("no calendar backend available — run 'oh-shit-meeting auth --credentials <file>' or install gws/gog")
 	}
 }
 

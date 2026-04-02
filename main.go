@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/GiGurra/boa/pkg/boa"
@@ -16,6 +19,7 @@ import (
 	"github.com/gigurra/oh-shit-meeting/internal/gui"
 	"github.com/gigurra/oh-shit-meeting/internal/reminder"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 type Params struct {
@@ -23,13 +27,20 @@ type Params struct {
 	WarnBefore   time.Duration `descr:"Global alert time before meeting" default:"5m"`
 	Sound        string        `descr:"Alert sound (none, or system sound name like Glass, Hero, Funk)" default:"Hero"`
 	Fullscreen   bool          `descr:"Show alerts in fullscreen mode for maximum obnoxiousness" default:"false"`
-	Backend      string        `descr:"Calendar backend to use" default:"auto" alts:"auto,gws,gog"`
+	Backend      string        `descr:"Calendar backend to use" default:"auto" alts:"auto,google,gws,gog"`
 }
 
 type ListEventsParams struct {
-	Backend string `descr:"Calendar backend to use" default:"auto" alts:"auto,gws,gog"`
+	Backend string `descr:"Calendar backend to use" default:"auto" alts:"auto,google,gws,gog"`
 	Json    bool   `descr:"Output as JSON" default:"false"`
 }
+
+type AuthParams struct {
+	Credentials string `optional:"true" descr:"Path to Google OAuth client credentials JSON from GCP console"`
+	Interactive bool   `short:"i" descr:"Enter client ID and secret interactively" default:"false"`
+}
+
+type LogoutParams struct{}
 
 func main() {
 	boa.CmdT[Params]{
@@ -40,6 +51,65 @@ func main() {
 			run(params)
 		},
 		SubCmds: boa.SubCmds(
+			boa.CmdT[AuthParams]{
+				Use:   "auth",
+				Short: "Authenticate with Google Calendar (OAuth2 browser flow)",
+				Long: `Authenticates with Google Calendar using OAuth2.
+
+Provide the path to a client credentials JSON file downloaded from the
+Google Cloud Console. The path is saved for subsequent use.
+
+The OAuth token is stored securely in the system keychain.
+
+To get a credentials file:
+  1. Go to https://console.cloud.google.com/apis/credentials
+  2. Create an OAuth 2.0 Client ID (Desktop app)
+  3. Enable the Google Calendar API
+  4. Download the JSON file`,
+				RunFunc: func(params *AuthParams, cmd *cobra.Command, args []string) {
+					if params.Interactive {
+						clientID, clientSecret := readClientCredentials()
+						if err := calendar.AuthenticateWithClientIDSecret(clientID, clientSecret); err != nil {
+							fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+							os.Exit(1)
+						}
+						fmt.Println("Authenticated successfully.")
+						return
+					}
+					credPath := params.Credentials
+					if credPath == "" {
+						credPath = calendar.GoogleCredentialsPath()
+					}
+					if credPath == "" {
+						fmt.Fprintln(os.Stderr, "Error: provide --credentials <file> or use --interactive to enter credentials")
+						fmt.Fprintln(os.Stderr, "")
+						fmt.Fprintln(os.Stderr, "Usage:")
+						fmt.Fprintln(os.Stderr, "  oh-shit-meeting auth --credentials /path/to/credentials.json")
+						fmt.Fprintln(os.Stderr, "  oh-shit-meeting auth --interactive")
+						os.Exit(1)
+					}
+					if err := calendar.Authenticate(credPath); err != nil {
+						fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+						os.Exit(1)
+					}
+					fmt.Println("Authenticated successfully.")
+				},
+			},
+			boa.CmdT[LogoutParams]{
+				Use:   "logout",
+				Short: "Remove stored Google OAuth token from system keychain",
+				RunFunc: func(params *LogoutParams, cmd *cobra.Command, args []string) {
+					if !calendar.HasGoogleToken() {
+						fmt.Println("No token found in keychain.")
+						return
+					}
+					if err := calendar.Logout(); err != nil {
+						fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+						os.Exit(1)
+					}
+					fmt.Println("Token removed from system keychain.")
+				},
+			},
 			boa.CmdT[ListEventsParams]{
 				Use:   "list-events",
 				Short: "List upcoming calendar events (live integration test)",
@@ -143,4 +213,31 @@ func runLoop(params *Params) {
 			}
 		}
 	}
+}
+
+func readClientCredentials() (clientID, clientSecret string) {
+	reader := bufio.NewReader(os.Stdin)
+
+	fmt.Print("Client ID: ")
+	clientID, _ = reader.ReadString('\n')
+	clientID = strings.TrimSpace(clientID)
+	if clientID == "" {
+		fmt.Fprintln(os.Stderr, "Error: client ID cannot be empty")
+		os.Exit(1)
+	}
+
+	fmt.Print("Client Secret: ")
+	secretBytes, err := term.ReadPassword(int(syscall.Stdin))
+	fmt.Println() // newline after hidden input
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error reading secret: %v\n", err)
+		os.Exit(1)
+	}
+	clientSecret = strings.TrimSpace(string(secretBytes))
+	if clientSecret == "" {
+		fmt.Fprintln(os.Stderr, "Error: client secret cannot be empty")
+		os.Exit(1)
+	}
+
+	return clientID, clientSecret
 }
