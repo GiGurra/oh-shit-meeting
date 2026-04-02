@@ -40,6 +40,8 @@ type AuthParams struct {
 	Interactive bool   `short:"i" descr:"Enter client ID and secret interactively" default:"false"`
 }
 
+type StatusParams struct{}
+
 type LogoutParams struct{}
 
 func main() {
@@ -93,6 +95,46 @@ To get a credentials file:
 						os.Exit(1)
 					}
 					fmt.Println("Authenticated successfully.")
+				},
+			},
+			boa.CmdT[StatusParams]{
+				Use:   "status",
+				Short: "Show Google Calendar authentication status",
+				RunFunc: func(params *StatusParams, cmd *cobra.Command, args []string) {
+					status := calendar.GetTokenStatus()
+
+					if !status.HasToken && !status.HasCredentials {
+						fmt.Println("Not authenticated.")
+						fmt.Println("Run: oh-shit-meeting auth --credentials <file>")
+						fmt.Println("  or: oh-shit-meeting auth --interactive")
+						return
+					}
+
+					if status.HasCredentials {
+						switch status.CredentialType {
+						case "file":
+							fmt.Printf("Credentials: %s (file)\n", status.CredentialInfo)
+						case "client_id":
+							fmt.Printf("Credentials: client ID %s\n", status.CredentialInfo)
+						}
+					} else {
+						fmt.Println("Credentials: not configured")
+					}
+
+					if status.HasToken {
+						fmt.Printf("Token: stored in system keychain\n")
+						fmt.Printf("Token type: %s\n", status.TokenType)
+						if !status.Expiry.IsZero() {
+							fmt.Printf("Expires: %s\n", status.Expiry.Local().Format("2006-01-02 15:04:05"))
+							if status.Expiry.After(time.Now()) {
+								fmt.Printf("Status: valid (expires in %s)\n", time.Until(status.Expiry).Round(time.Second))
+							} else {
+								fmt.Println("Status: expired (will auto-refresh on next use)")
+							}
+						}
+					} else {
+						fmt.Println("Token: not found")
+					}
 				},
 			},
 			boa.CmdT[LogoutParams]{

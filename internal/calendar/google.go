@@ -137,6 +137,44 @@ func GoogleCredentialsPath() string {
 	return loadAppConfig().GoogleCredentials
 }
 
+// TokenStatus contains information about the stored OAuth token.
+type TokenStatus struct {
+	HasToken       bool
+	TokenType      string
+	Expiry         time.Time
+	HasCredentials bool
+	CredentialType string // "file" or "client_id"
+	CredentialInfo string // file path or client ID
+}
+
+// GetTokenStatus returns the current authentication status.
+func GetTokenStatus() TokenStatus {
+	status := TokenStatus{}
+
+	tok, err := loadToken()
+	if err == nil {
+		status.HasToken = true
+		status.TokenType = tok.TokenType
+		status.Expiry = tok.Expiry
+	}
+
+	cfg := loadAppConfig()
+	if cfg.GoogleCredentials != "" {
+		status.HasCredentials = true
+		status.CredentialType = "file"
+		status.CredentialInfo = cfg.GoogleCredentials
+	} else if cfg.GoogleClientID != "" {
+		secret, err := keyring.Get(keyringService, keyringClientSecretUser)
+		if err == nil && secret != "" {
+			status.HasCredentials = true
+			status.CredentialType = "client_id"
+			status.CredentialInfo = cfg.GoogleClientID
+		}
+	}
+
+	return status
+}
+
 // HasGoogleCredentials returns true if any form of Google credentials is configured.
 func HasGoogleCredentials() bool {
 	cfg := loadAppConfig()
