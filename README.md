@@ -41,16 +41,20 @@ A calendar reminder daemon that makes sure you never miss a meeting by displayin
 **Recommended:** Use the built-in Google Calendar integration (no external tools needed):
 
 ```bash
+# Option 1: Use a credentials JSON file from GCP
 oh-shit-meeting auth --credentials /path/to/credentials.json
+
+# Option 2: Enter client ID and secret interactively
+oh-shit-meeting auth --interactive
 ```
 
-To get a credentials file:
+To get credentials:
 1. Go to [Google Cloud Console - Credentials](https://console.cloud.google.com/apis/credentials)
 2. Create an OAuth 2.0 Client ID (Desktop app)
 3. Enable the [Google Calendar API](https://console.cloud.google.com/apis/library/calendar-json.googleapis.com)
-4. Download the JSON file
+4. Download the JSON file, or copy the client ID and secret
 
-The OAuth token is stored securely in your system keychain (macOS Keychain, GNOME Keyring, or Windows Credential Manager). The credentials file path is saved in `~/.oh-shit-meeting/config.json` so you only need to specify it once.
+All secrets (OAuth token, client secret) are stored securely in your system keychain (macOS Keychain, GNOME Keyring, or Windows Credential Manager). You only need to authenticate once — re-running `oh-shit-meeting auth` reuses stored credentials.
 
 **Alternative:** Use one of these Google Calendar CLI tools instead:
 
