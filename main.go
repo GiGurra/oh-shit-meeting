@@ -78,32 +78,30 @@ To get a credentials file:
 						fmt.Println("Authenticated successfully.")
 						return
 					}
-					credPath := params.Credentials
-					if credPath == "" {
-						credPath = calendar.GoogleCredentialsPath()
-					}
-					// If no credentials file, try stored client ID + secret
-					if credPath == "" {
-						if calendar.HasStoredClientCredentials() {
-							if err := calendar.ReAuthenticate(); err != nil {
-								fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-								os.Exit(1)
-							}
-							fmt.Println("Authenticated successfully.")
-							return
+					// Try credentials file if provided
+					if params.Credentials != "" {
+						if err := calendar.Authenticate(params.Credentials); err != nil {
+							fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+							os.Exit(1)
 						}
-						fmt.Fprintln(os.Stderr, "Error: no stored credentials found")
-						fmt.Fprintln(os.Stderr, "")
-						fmt.Fprintln(os.Stderr, "Usage:")
-						fmt.Fprintln(os.Stderr, "  oh-shit-meeting auth --credentials /path/to/credentials.json")
-						fmt.Fprintln(os.Stderr, "  oh-shit-meeting auth --interactive")
-						os.Exit(1)
+						fmt.Println("Authenticated successfully.")
+						return
 					}
-					if err := calendar.Authenticate(credPath); err != nil {
-						fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-						os.Exit(1)
+					// Try stored client credentials from previous auth
+					if calendar.HasGoogleCredentials() {
+						if err := calendar.ReAuthenticate(); err != nil {
+							fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+							os.Exit(1)
+						}
+						fmt.Println("Authenticated successfully.")
+						return
 					}
-					fmt.Println("Authenticated successfully.")
+					fmt.Fprintln(os.Stderr, "Error: no stored credentials found")
+					fmt.Fprintln(os.Stderr, "")
+					fmt.Fprintln(os.Stderr, "Usage:")
+					fmt.Fprintln(os.Stderr, "  oh-shit-meeting auth --credentials /path/to/credentials.json")
+					fmt.Fprintln(os.Stderr, "  oh-shit-meeting auth --interactive")
+					os.Exit(1)
 				},
 			},
 			boa.CmdT[StatusParams]{
@@ -120,12 +118,8 @@ To get a credentials file:
 					}
 
 					if status.HasCredentials {
-						switch status.CredentialType {
-						case "file":
-							fmt.Printf("Credentials: %s (file)\n", status.CredentialInfo)
-						case "client_id":
-							fmt.Printf("Credentials: client ID %s\n", status.CredentialInfo)
-						}
+						fmt.Printf("Client ID: %s\n", status.ClientID)
+						fmt.Println("Client secret: stored in system keychain")
 					} else {
 						fmt.Println("Credentials: not configured")
 					}

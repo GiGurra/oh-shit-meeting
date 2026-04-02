@@ -42,8 +42,7 @@ func configFilePath() string {
 const keyringClientSecretUser = "google-client-secret"
 
 type appConfig struct {
-	GoogleCredentials string `json:"google_credentials,omitempty"`
-	GoogleClientID    string `json:"google_client_id,omitempty"`
+	GoogleClientID string `json:"google_client_id,omitempty"`
 }
 
 func loadAppConfig() appConfig {
@@ -91,7 +90,7 @@ func oauthConfigFromClientIDSecret(clientID, clientSecret string) *oauth2.Config
 	}
 }
 
-// resolveOAuthConfig returns an oauth2.Config from saved credentials (file or client ID/secret).
+// resolveOAuthConfig returns an oauth2.Config from stored client ID + secret in keychain.
 func resolveOAuthConfig() (*oauth2.Config, error) {
 	cfg := loadAppConfig()
 	if cfg.GoogleClientID != "" {
@@ -99,9 +98,6 @@ func resolveOAuthConfig() (*oauth2.Config, error) {
 		if err == nil && secret != "" {
 			return oauthConfigFromClientIDSecret(cfg.GoogleClientID, secret), nil
 		}
-	}
-	if cfg.GoogleCredentials != "" {
-		return loadCredentials(cfg.GoogleCredentials)
 	}
 	return nil, fmt.Errorf("no Google credentials configured — run 'oh-shit-meeting auth'")
 }
@@ -132,11 +128,6 @@ func HasGoogleToken() bool {
 	return err == nil
 }
 
-// GoogleCredentialsPath returns the saved credentials path, or empty if not configured.
-func GoogleCredentialsPath() string {
-	return loadAppConfig().GoogleCredentials
-}
-
 // TokenStatus contains information about the stored OAuth token.
 type TokenStatus struct {
 	HasToken        bool
@@ -144,8 +135,7 @@ type TokenStatus struct {
 	Expiry          time.Time
 	HasRefreshToken bool
 	HasCredentials  bool
-	CredentialType  string // "file" or "client_id"
-	CredentialInfo  string // file path or client ID
+	ClientID        string
 }
 
 // GetTokenStatus returns the current authentication status.
@@ -161,37 +151,19 @@ func GetTokenStatus() TokenStatus {
 	}
 
 	cfg := loadAppConfig()
-	if cfg.GoogleCredentials != "" {
-		status.HasCredentials = true
-		status.CredentialType = "file"
-		status.CredentialInfo = cfg.GoogleCredentials
-	} else if cfg.GoogleClientID != "" {
+	if cfg.GoogleClientID != "" {
 		secret, err := keyring.Get(keyringService, keyringClientSecretUser)
 		if err == nil && secret != "" {
 			status.HasCredentials = true
-			status.CredentialType = "client_id"
-			status.CredentialInfo = cfg.GoogleClientID
+			status.ClientID = cfg.GoogleClientID
 		}
 	}
 
 	return status
 }
 
-// HasGoogleCredentials returns true if any form of Google credentials is configured.
+// HasGoogleCredentials returns true if client ID + secret are stored.
 func HasGoogleCredentials() bool {
-	cfg := loadAppConfig()
-	if cfg.GoogleCredentials != "" {
-		return true
-	}
-	if cfg.GoogleClientID != "" {
-		secret, err := keyring.Get(keyringService, keyringClientSecretUser)
-		return err == nil && secret != ""
-	}
-	return false
-}
-
-// HasStoredClientCredentials returns true if client ID + secret are saved from a previous auth.
-func HasStoredClientCredentials() bool {
 	cfg := loadAppConfig()
 	if cfg.GoogleClientID == "" {
 		return false
@@ -210,6 +182,7 @@ func ReAuthenticate() error {
 }
 
 // Authenticate runs the OAuth2 authorization code flow using a credentials JSON file.
+// Extracts client ID and secret from the file and stores them in keychain.
 func Authenticate(credentialsPath string) error {
 	oauthCfg, err := loadCredentials(credentialsPath)
 	if err != nil {
@@ -220,16 +193,15 @@ func Authenticate(credentialsPath string) error {
 		return err
 	}
 
-	// Save credentials path to config for future use (clears client ID if previously set)
-	absPath, _ := filepath.Abs(credentialsPath)
-	cfg := loadAppConfig()
-	cfg.GoogleCredentials = absPath
-	cfg.GoogleClientID = ""
-	if err := saveAppConfig(cfg); err != nil {
-		slog.Warn("Could not save credentials path to config", "error", err)
+	// Store client ID/secret from the file into keychain
+	if err := keyring.Set(keyringService, keyringClientSecretUser, oauthCfg.ClientSecret); err != nil {
+		return fmt.Errorf("save client secret to keychain: %w", err)
 	}
-	// Clean up any previous client secret from keychain
-	_ = keyring.Delete(keyringService, keyringClientSecretUser)
+	cfg := loadAppConfig()
+	cfg.GoogleClientID = oauthCfg.ClientID
+	if err := saveAppConfig(cfg); err != nil {
+		slog.Warn("Could not save config", "error", err)
+	}
 	return nil
 }
 
@@ -249,7 +221,6 @@ func AuthenticateWithClientIDSecret(clientID, clientSecret string) error {
 	// Save client ID to config (not secret — it's in keychain)
 	cfg := loadAppConfig()
 	cfg.GoogleClientID = clientID
-	cfg.GoogleCredentials = ""
 	if err := saveAppConfig(cfg); err != nil {
 		slog.Warn("Could not save config", "error", err)
 	}
