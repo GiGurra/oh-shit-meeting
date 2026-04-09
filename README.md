@@ -115,6 +115,7 @@ oh-shit-meeting &; disown
 |------|---------|-------------|
 | `--poll-interval` | `5m` | How often to poll Google Calendar |
 | `--warn-before` | `5m` | Global reminder time before meetings |
+| `--fullscreen`  | false | Alerts/pop-ups shown in in full-screen mode |
 | `--sound` | `Hero` | Alert sound (macOS: Glass, Hero, Funk, etc. or `none`) |
 | `--backend` | `auto` | Calendar backend: `auto`, `google`, `gws`, or `gog` |
 | `--lookahead-days` | `3` | How many days ahead to look for events |
