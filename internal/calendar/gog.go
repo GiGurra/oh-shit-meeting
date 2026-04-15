@@ -1,10 +1,12 @@
 package calendar
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os/exec"
+	"time"
 )
 
 type gogResponse struct {
@@ -12,7 +14,9 @@ type gogResponse struct {
 }
 
 func fetchEventsGog(from, to string) ([]Event, error) {
-	cmd := exec.Command("gog", "calendar", "list",
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "gog", "calendar", "list",
 		"--from="+from,
 		"--to="+to,
 		"--all",

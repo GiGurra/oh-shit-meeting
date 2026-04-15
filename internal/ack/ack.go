@@ -2,8 +2,10 @@ package ack
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // Store defines the interface for acknowledgment storage
@@ -56,4 +58,33 @@ func MarkAcked(eventID, reminderID string) error {
 		return fmt.Errorf("failed to create ack file: %w", err)
 	}
 	return f.Close()
+}
+
+// Cleanup removes ack directories older than maxAge.
+func Cleanup(maxAge time.Duration) {
+	dir := dirFunc()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+
+	cutoff := time.Now().Add(-maxAge)
+	removed := 0
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			if err := os.RemoveAll(filepath.Join(dir, entry.Name())); err == nil {
+				removed++
+			}
+		}
+	}
+	if removed > 0 {
+		slog.Info("Cleaned up old ack files", "removed", removed)
+	}
 }

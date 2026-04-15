@@ -1,11 +1,13 @@
 package calendar
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"time"
 )
 
 type gwsResponse struct {
@@ -19,7 +21,9 @@ type gwsCalendarListResponse struct {
 }
 
 func gwsListCalendars() ([]string, error) {
-	cmd := exec.Command("gws", "calendar", "calendarList", "list", "--params", "{}")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "gws", "calendar", "calendarList", "list", "--params", "{}")
 	output, err := cmd.Output()
 	if err != nil {
 		var exitErr *exec.ExitError
@@ -53,7 +57,9 @@ func gwsFetchEventsForCalendar(calendarID, from, to string) ([]Event, error) {
 		return nil, fmt.Errorf("failed to marshal params: %w", err)
 	}
 
-	cmd := exec.Command("gws", "calendar", "events", "list", "--params", string(params))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "gws", "calendar", "events", "list", "--params", string(params))
 	output, err := cmd.Output()
 	if err != nil {
 		var exitErr *exec.ExitError

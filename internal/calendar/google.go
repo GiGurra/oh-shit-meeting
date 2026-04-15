@@ -437,13 +437,18 @@ func fetchEventsGoogle(from, to string) ([]Event, error) {
 	return events, err
 }
 
+const apiTimeout = 30 * time.Second
+
 func doFetchEventsGoogle(from, to string) ([]Event, error) {
 	svc, err := newGoogleService()
 	if err != nil {
 		return nil, err
 	}
 
-	calendars, err := svc.CalendarList.List().Do()
+	ctx, cancel := context.WithTimeout(context.Background(), apiTimeout)
+	defer cancel()
+
+	calendars, err := svc.CalendarList.List().Context(ctx).Do()
 	if err != nil {
 		return nil, fmt.Errorf("list calendars: %w", err)
 	}
@@ -486,7 +491,9 @@ func fetchGoogleCalendarEvents(svc *gcal.Service, calendarID, from, to string) (
 			call = call.PageToken(pageToken)
 		}
 
-		resp, err := call.Do()
+		ctx, cancel := context.WithTimeout(context.Background(), apiTimeout)
+		resp, err := call.Context(ctx).Do()
+		cancel()
 		if err != nil {
 			return nil, err
 		}

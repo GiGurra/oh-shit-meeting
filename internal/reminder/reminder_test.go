@@ -321,8 +321,8 @@ func TestFindNext_AlreadyAcknowledged(t *testing.T) {
 	event := makeEvent("evt1", "Acked Meeting", start, end)
 	events := []calendar.Event{event}
 
-	// Mark as already acknowledged
-	ackStore.setAcked("evt1", "global")
+	// Mark as already acknowledged (using composite ack key)
+	ackStore.setAcked(AckEventKey("evt1", start), "global")
 
 	result := finder.FindNext(events)
 	if result != nil {
@@ -343,7 +343,7 @@ func TestFindNext_StartedAlreadyAcknowledged(t *testing.T) {
 	events := []calendar.Event{event}
 
 	// Mark started reminder as acknowledged
-	ackStore.setAcked("evt1", "started")
+	ackStore.setAcked(AckEventKey("evt1", start), "started")
 
 	result := finder.FindNext(events)
 	if result != nil {
@@ -377,13 +377,15 @@ func TestFindNext_MultipleEvents_FirstAcked(t *testing.T) {
 	ackStore := newMockAckStore()
 	finder := NewFinder(ackStore, clock, Config{WarnBefore: 5 * time.Minute})
 
+	start1 := now.Add(3 * time.Minute)
+	start2 := now.Add(4 * time.Minute)
 	events := []calendar.Event{
-		makeEvent("evt1", "First Meeting", now.Add(3*time.Minute), now.Add(30*time.Minute)),
-		makeEvent("evt2", "Second Meeting", now.Add(4*time.Minute), now.Add(1*time.Hour)),
+		makeEvent("evt1", "First Meeting", start1, now.Add(30*time.Minute)),
+		makeEvent("evt2", "Second Meeting", start2, now.Add(1*time.Hour)),
 	}
 
 	// First is already acknowledged
-	ackStore.setAcked("evt1", "global")
+	ackStore.setAcked(AckEventKey("evt1", start1), "global")
 
 	result := finder.FindNext(events)
 	if result == nil {
@@ -513,7 +515,7 @@ func TestFindNext_CustomReminderAckedFallbackToGlobal(t *testing.T) {
 	events := []calendar.Event{event}
 
 	// Custom reminder is acked
-	ackStore.setAcked("evt1", "10m")
+	ackStore.setAcked(AckEventKey("evt1", start), "10m")
 
 	result := finder.FindNext(events)
 	if result == nil {
@@ -585,7 +587,7 @@ func TestFindNext_GlobalAckedShouldSuppressStarted(t *testing.T) {
 	events := []calendar.Event{event}
 
 	// User already acknowledged the global reminder before the meeting started
-	ackStore.setAcked("evt1", "global")
+	ackStore.setAcked(AckEventKey("evt1", start), "global")
 
 	result := finder.FindNext(events)
 	if result != nil {
@@ -607,7 +609,7 @@ func TestFindNext_CustomReminderAckedShouldNotSuppressStarted(t *testing.T) {
 	events := []calendar.Event{event}
 
 	// User acknowledged the 10m custom reminder (early warning)
-	ackStore.setAcked("evt1", "10m")
+	ackStore.setAcked(AckEventKey("evt1", start), "10m")
 
 	result := finder.FindNext(events)
 	if result == nil {
@@ -615,6 +617,50 @@ func TestFindNext_CustomReminderAckedShouldNotSuppressStarted(t *testing.T) {
 	}
 	if result.ReminderID != "started" {
 		t.Errorf("expected started reminder, got %s", result.ReminderID)
+	}
+}
+
+func TestFindNext_StaleAckFromDifferentDateDoesNotSilence(t *testing.T) {
+	// Scenario: Same event ID was acked on a previous date (recurring/rescheduled event).
+	// The current instance at a different time should NOT be suppressed.
+	now := time.Date(2026, 4, 15, 13, 12, 0, 0, time.UTC)
+	clock := &mockClock{now: now}
+	ackStore := newMockAckStore()
+	finder := NewFinder(ackStore, clock, Config{WarnBefore: 5 * time.Minute})
+
+	// Current instance: April 15 at 13:15
+	currentStart := time.Date(2026, 4, 15, 13, 15, 0, 0, time.UTC)
+	currentEnd := time.Date(2026, 4, 15, 14, 0, 0, 0, time.UTC)
+	event := makeEvent("recurring-evt", "Weekly AI Meeting", currentStart, currentEnd)
+	events := []calendar.Event{event}
+
+	// Stale ack from April 13 instance (same event ID, different start time)
+	previousStart := time.Date(2026, 4, 13, 13, 15, 0, 0, time.UTC)
+	ackStore.setAcked(AckEventKey("recurring-evt", previousStart), "global")
+
+	result := finder.FindNext(events)
+	if result == nil {
+		t.Fatal("expected reminder (stale ack from different date should not suppress), got nil")
+	}
+	if result.ReminderID != "global" {
+		t.Errorf("expected global reminder, got %s", result.ReminderID)
+	}
+}
+
+func TestFindNext_AckEventKeyIncludesStartTime(t *testing.T) {
+	// Verify the AckEventKey format
+	startTime := time.Date(2026, 4, 15, 11, 15, 0, 0, time.UTC)
+	key := AckEventKey("abc123", startTime)
+	expected := "abc123_20260415T111500Z"
+	if key != expected {
+		t.Errorf("expected ack key %q, got %q", expected, key)
+	}
+
+	// Different start time produces different key
+	otherStart := time.Date(2026, 4, 16, 11, 15, 0, 0, time.UTC)
+	otherKey := AckEventKey("abc123", otherStart)
+	if key == otherKey {
+		t.Error("expected different ack keys for different start times")
 	}
 }
 

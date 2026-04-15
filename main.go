@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -249,6 +250,9 @@ func run(params *Params) {
 	// Re-auth before starting if token is stale
 	calendar.ReAuthIfStale()
 
+	// Clean up ack files older than 7 days
+	ack.Cleanup(7 * 24 * time.Hour)
+
 	gui.Init()
 	go runLoop(params)
 	gui.Run()
@@ -256,7 +260,7 @@ func run(params *Params) {
 
 func runLoop(params *Params) {
 	var events []calendar.Event
-	var lastPoll time.Time
+	var eventsMu sync.Mutex
 
 	ackStore := &ack.FileStore{}
 	clock := &reminder.RealClock{}
@@ -265,19 +269,29 @@ func runLoop(params *Params) {
 		Sound:      params.Sound,
 	})
 
+	// Poll calendar in a separate goroutine so slow/hung API calls
+	// never block the alert check loop.
+	go func() {
+		for {
+			calendar.ReAuthIfStale()
+			newEvents := calendar.Poll(params.Backend, params.LookaheadDays)
+			eventsMu.Lock()
+			events = newEvents
+			eventsMu.Unlock()
+			time.Sleep(params.PollInterval)
+		}
+	}()
+
+	// Check for reminders every second, independent of polling.
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		// Poll Google if needed
-		if time.Since(lastPoll) >= params.PollInterval {
-			calendar.ReAuthIfStale()
-			events = calendar.Poll(params.Backend, params.LookaheadDays)
-			lastPoll = time.Now()
-		}
+		eventsMu.Lock()
+		evts := events
+		eventsMu.Unlock()
 
-		// Check for reminders to fire
-		info := finder.FindNext(events)
+		info := finder.FindNext(evts)
 		if info != nil {
 			slog.Warn("MEETING STARTING SOON",
 				"event", info.Event.Summary,
@@ -299,7 +313,7 @@ func runLoop(params *Params) {
 				Fullscreen:     params.Fullscreen,
 			})
 
-			if err := ackStore.MarkAcked(info.Event.ID, info.ReminderID); err != nil {
+			if err := ackStore.MarkAcked(info.AckEventKey, info.ReminderID); err != nil {
 				slog.Error("Failed to mark reminder as acknowledged", "error", err)
 			}
 		}

@@ -3,7 +3,6 @@ package calendar
 import (
 	"fmt"
 	"log/slog"
-	"os/exec"
 	"sort"
 	"time"
 )
@@ -69,21 +68,12 @@ func FetchEvents(from, to, backend string) ([]Event, string, error) {
 		events, err := fetchEventsGog(from, to)
 		return events, "gogcli", err
 	default: // "auto" or empty
-		// Prefer native Google API if authenticated
+		// Use native Google API if authenticated
 		if HasGoogleToken() && HasGoogleCredentials() {
 			events, err := fetchEventsGoogle(from, to)
 			return events, "gcal-native", err
 		}
-		// Fall back to CLI tools
-		if _, err := exec.LookPath("gws"); err == nil {
-			events, err := fetchEventsGWS(from, to)
-			return events, "gws", err
-		}
-		if _, err := exec.LookPath("gog"); err == nil {
-			events, err := fetchEventsGog(from, to)
-			return events, "gogcli", err
-		}
-		return nil, "", fmt.Errorf("no calendar backend available — run 'oh-shit-meeting auth --credentials <file>' or install gws/gog")
+		return nil, "", fmt.Errorf("no calendar backend available — run 'oh-shit-meeting auth --credentials <file>'")
 	}
 }
 
