@@ -9,11 +9,12 @@ A calendar reminder daemon that makes sure you never miss a meeting by displayin
 - **Systray app** - Lives in your menu bar
 - **Flashing red popup** - Impossible to ignore
 - **Looping alert sound** - Keeps playing until you acknowledge
-- **Google Calendar integration** - Native OAuth2 or via `gws`/`gog` CLI
+- **Google Calendar integration** - Native OAuth2 (or `gws`/`gog` CLI as explicit backend)
 - **Custom reminder support** - Respects your calendar's reminder settings (30m, 2h, etc.)
 - **Global fallback reminder** - Configurable default reminder for all events
+- **Non-blocking polling** - Calendar polling runs in a background goroutine with timeouts, so alerts always fire on time even if the API is slow
 - **Cross-platform audio** - macOS system sounds; generated tones on Linux/Windows (experimental, untested)
-- **Deduplication** - Each reminder only fires once (persisted to disk)
+- **Deduplication** - Each reminder only fires once per event instance (persisted to disk, auto-cleaned after 7 days)
 
 ## Screenshot
 
@@ -56,12 +57,10 @@ To get credentials:
 
 All secrets (OAuth token, client secret) are stored securely in your system keychain (macOS Keychain, GNOME Keyring, or Windows Credential Manager). You only need to authenticate once — re-running `oh-shit-meeting auth` reuses stored credentials.
 
-**Alternative:** Use one of these Google Calendar CLI tools instead:
+**Alternative:** You can also use one of these CLI tools as an explicit backend (`--backend=gws` or `--backend=gog`):
 
 - [gws](https://github.com/googleworkspace/cli) - Google Workspace CLI
 - [gog](https://github.com/steipete/gogcli) - Google API CLI tool
-
-By default, the native Google API is used if authenticated, otherwise falls back to `gws`, then `gog`. Use `--backend` to override.
 
 ## Installation
 
@@ -123,16 +122,17 @@ oh-shit-meeting &; disown
 ## How It Works
 
 1. Runs as a systray app (red circle in menu bar)
-2. Checks reminders every second against cached events
-3. Polls Google Calendar (native API, or via `gws`/`gog`) every poll interval
+2. Polls Google Calendar in a **background goroutine** every poll interval (with 30s timeout per API call)
+3. Checks reminders **every second** against cached events (never blocked by polling)
 4. For each upcoming event, checks:
    - Custom reminder overrides (popup reminders only)
    - Global `--warn-before` threshold
 5. When a reminder triggers:
-   - Creates an ack file at `~/.oh-shit-meeting/<event-id>/<reminder>.acked`
+   - Creates an ack file at `~/.oh-shit-meeting/<event-id>_<start-time>/<reminder>.acked`
    - Shows flashing red popup window
    - Plays alert sound on loop
 6. Click ACKNOWLEDGE to dismiss
+7. Stale ack files are cleaned up automatically after 7 days
 
 ## Running as a Background Service
 
