@@ -51,9 +51,16 @@ func Get(service, user string) (string, error) {
 	if err2 == nil {
 		return v2, nil
 	}
-	// Both missing — report a not-found.
-	if errors.Is(err, ErrNotFound) || errors.Is(err2, ErrNotFound) {
+	// Both sides failed. Only report ErrNotFound when both agree nothing was
+	// found; otherwise surface the actionable (non-not-found) error.
+	if errors.Is(err, ErrNotFound) && errors.Is(err2, ErrNotFound) {
 		return "", ErrNotFound
+	}
+	if errors.Is(err, ErrNotFound) {
+		return "", err2
+	}
+	if errors.Is(err2, ErrNotFound) {
+		return "", err
 	}
 	return "", fmt.Errorf("keychain: %v; file: %v", err, err2)
 }
@@ -63,6 +70,13 @@ func Get(service, user string) (string, error) {
 func Set(service, user, value string) error {
 	err := keyring.Set(service, user, value)
 	if err == nil {
+		// Remove any stale plaintext fallback so we don't leave a valid secret
+		// sitting in secrets.json after the keychain has come back.
+		if ferr := fileDelete(service, user); ferr != nil && !errors.Is(ferr, ErrNotFound) {
+			slog.Warn("failed to remove plaintext fallback after keychain save",
+				"path", filePath(),
+				"error", ferr)
+		}
 		return nil
 	}
 	if !insecureEnabled() {
@@ -92,21 +106,24 @@ func Location(service, user string) string {
 }
 
 // Delete removes a secret from the keychain and the file fallback (best-effort).
+// Returns nil when at least one side successfully removed the entry (or both
+// agree it was already absent), so `logout` succeeds even when only the file
+// fallback existed but the keychain is unreachable.
 func Delete(service, user string) error {
 	kerr := keyring.Delete(service, user)
 	ferr := fileDelete(service, user)
-	// Success if at least one side removed something (or neither had it).
-	if (kerr == nil || errors.Is(kerr, ErrNotFound)) &&
-		(ferr == nil || errors.Is(ferr, ErrNotFound)) {
+	kOK := kerr == nil || errors.Is(kerr, ErrNotFound)
+	fOK := ferr == nil || errors.Is(ferr, ErrNotFound)
+	switch {
+	case kOK && fOK:
 		return nil
-	}
-	if kerr != nil && ferr != nil {
+	case fOK:
+		return kerr
+	case kOK:
+		return ferr
+	default:
 		return fmt.Errorf("keychain: %v; file: %v", kerr, ferr)
 	}
-	if kerr != nil {
-		return kerr
-	}
-	return ferr
 }
 
 // ---------- file fallback ----------

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os/exec"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -55,9 +56,9 @@ func Init(c Config) error {
 	redIcon = makeTrayIcon(color.RGBA{R: 200, G: 30, B: 30, A: 255})
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", handleIndex)
-	mux.HandleFunc("/state", handleState)
-	mux.HandleFunc("/ack", handleAck)
+	mux.HandleFunc("/", guardLocal(handleIndex))
+	mux.HandleFunc("/state", guardLocal(handleState))
+	mux.HandleFunc("/ack", guardLocal(handleAck))
 
 	addr := fmt.Sprintf("127.0.0.1:%d", cfg.Port)
 	ln, err := net.Listen("tcp", addr)
@@ -181,6 +182,46 @@ type stateDTO struct {
 	Now      time.Time  `json:"now"`
 }
 
+// guardLocal rejects requests with a non-loopback Host header (blocking
+// DNS-rebinding attacks) and requires a same-origin Origin header for
+// state-changing methods (blocking cross-origin POSTs to /ack).
+func guardLocal(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		host, _, err := net.SplitHostPort(r.Host)
+		if err != nil {
+			host = r.Host
+		}
+		switch host {
+		case "127.0.0.1", "::1", "localhost":
+			// ok
+		default:
+			http.Error(w, "invalid host", http.StatusForbidden)
+			return
+		}
+		// Non-idempotent methods must come from our own origin (or no origin,
+		// which includes direct CLI/curl invocations).
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			if origin := r.Header.Get("Origin"); origin != "" {
+				if !isOwnOrigin(origin) {
+					http.Error(w, "cross-origin forbidden", http.StatusForbidden)
+					return
+				}
+			}
+		}
+		next(w, r)
+	}
+}
+
+func isOwnOrigin(origin string) bool {
+	origin = strings.TrimSuffix(origin, "/")
+	for _, host := range []string{"127.0.0.1", "[::1]", "localhost"} {
+		if origin == fmt.Sprintf("http://%s:%d", host, cfg.Port) {
+			return true
+		}
+	}
+	return false
+}
+
 func handleIndex(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
@@ -221,13 +262,17 @@ func handleAck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.URL.Query().Get("id")
+	if id == "" {
+		http.Error(w, "missing id", http.StatusBadRequest)
+		return
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	if active == nil || activeDone == nil {
 		http.Error(w, "no active alert", http.StatusConflict)
 		return
 	}
-	if id != "" && id != active.ReminderID {
+	if id != active.ReminderID {
 		http.Error(w, "alert id mismatch", http.StatusConflict)
 		return
 	}

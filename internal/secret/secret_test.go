@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -53,7 +54,7 @@ func TestFileNotFound(t *testing.T) {
 }
 
 func TestFilePermissions(t *testing.T) {
-	if os.Getenv("GOOS") == "windows" {
+	if runtime.GOOS == "windows" {
 		t.Skip("unix perms only")
 	}
 	isolateFile(t)

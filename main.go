@@ -102,7 +102,10 @@ func main() {
 Provide the path to a client credentials JSON file downloaded from the
 Google Cloud Console. The path is saved for subsequent use.
 
-The OAuth token is stored securely in the system keychain.
+By default, the OAuth token and client secret are stored in the system
+keychain. If --accept-insecure-secret-storage is set and the keychain is
+unavailable (e.g. on WSL without gnome-keyring), they fall back to a
+plaintext JSON file under the platform's user config directory.
 
 To get a credentials file:
   1. Go to https://console.cloud.google.com/apis/credentials
