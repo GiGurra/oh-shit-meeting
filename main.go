@@ -321,12 +321,25 @@ func runTestAlert(params *Params) {
 		gui.ShowPopupBlocking(gui.ReminderInfo{
 			Summary:       "TEST ALERT — oh shit, a meeting!",
 			StartTime:     start,
+			EndTime:       start.Add(30 * time.Minute),
 			TimeUntil:     time.Until(start),
 			ReminderID:    "test-alert",
 			Sound:         params.Sound,
 			Location:      "Your screen",
 			OrganizerName: "oh-shit-meeting self-test",
 			Fullscreen:    params.Fullscreen,
+			Calendar:      "Test calendar",
+			Description: "<p>This is a <b>synthetic</b> alert fired with <code>--display-test-alert</code>.</p>" +
+				"<p>The real alert renders the event description here — sanitized against an allowlist so tags like <a href=\"https://example.com\">safe links</a>, <i>italics</i>, and lists work, but <code>&lt;script&gt;</code> and event handlers are stripped.</p>" +
+				"<ul><li>Attendees below</li><li>Join Meet button above</li><li>Open in Google Calendar link at the bottom</li></ul>" +
+				"<p>Acknowledge to exit.</p>",
+			HangoutLink:   "https://meet.google.com/test-test-test",
+			HtmlLink:      "https://calendar.google.com/",
+			Attendees: []gui.Attendee{
+				{DisplayName: "You", Email: "you@example.com", ResponseStatus: "accepted", Self: true},
+				{DisplayName: "A colleague", Email: "colleague@example.com", ResponseStatus: "accepted"},
+				{DisplayName: "Someone busy", Email: "busy@example.com", ResponseStatus: "tentative"},
+			},
 		})
 		slog.Info("test alert acknowledged — exiting in 2s")
 		// Give the page time to poll /state once more and flip back to the
@@ -389,9 +402,24 @@ func runLoop(params *Params, store *eventStore) {
 				"source", info.ReminderID,
 			)
 
+			var endTime time.Time
+			if info.Event.End.DateTime != "" {
+				endTime, _ = time.Parse(time.RFC3339, info.Event.End.DateTime)
+			}
+			attendees := make([]gui.Attendee, 0, len(info.Event.Attendees))
+			for _, a := range info.Event.Attendees {
+				attendees = append(attendees, gui.Attendee{
+					Email:          a.Email,
+					DisplayName:    a.DisplayName,
+					ResponseStatus: a.ResponseStatus,
+					Self:           a.Self,
+					Organizer:      a.Organizer,
+				})
+			}
 			gui.ShowPopupBlocking(gui.ReminderInfo{
 				Summary:        info.Event.Summary,
 				StartTime:      info.StartTime,
+				EndTime:        endTime,
 				TimeUntil:      info.TimeUntil,
 				ReminderID:     info.ReminderID,
 				Sound:          info.Sound,
@@ -399,6 +427,11 @@ func runLoop(params *Params, store *eventStore) {
 				OrganizerName:  info.Event.Organizer.DisplayName,
 				OrganizerEmail: info.Event.Organizer.Email,
 				Fullscreen:     params.Fullscreen,
+				Calendar:       info.Event.Calendar,
+				Description:    info.Event.Description,
+				HangoutLink:    info.Event.HangoutLink,
+				HtmlLink:       info.Event.HtmlLink,
+				Attendees:      attendees,
 			})
 
 			if err := ackStore.MarkAcked(info.AckEventKey, info.ReminderID); err != nil {

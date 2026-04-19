@@ -30,6 +30,7 @@ type Config struct {
 type ReminderInfo struct {
 	Summary        string
 	StartTime      time.Time
+	EndTime        time.Time
 	TimeUntil      time.Duration
 	ReminderID     string
 	Sound          string
@@ -37,6 +38,19 @@ type ReminderInfo struct {
 	OrganizerName  string
 	OrganizerEmail string
 	Fullscreen     bool
+	Calendar       string
+	Description    string
+	HangoutLink    string
+	HtmlLink       string
+	Attendees      []Attendee
+}
+
+type Attendee struct {
+	Email          string
+	DisplayName    string
+	ResponseStatus string
+	Self           bool
+	Organizer      bool
 }
 
 var (
@@ -160,13 +174,19 @@ func flashTray(done <-chan struct{}) {
 // ---------------- HTTP handlers ----------------
 
 type alertDTO struct {
-	Summary        string    `json:"summary"`
-	StartTime      time.Time `json:"startTime"`
-	ReminderID     string    `json:"reminderId"`
-	Location       string    `json:"location,omitempty"`
-	OrganizerName  string    `json:"organizerName,omitempty"`
-	OrganizerEmail string    `json:"organizerEmail,omitempty"`
-	Fullscreen     bool      `json:"fullscreen"`
+	Summary        string        `json:"summary"`
+	StartTime      time.Time     `json:"startTime"`
+	EndTime        time.Time     `json:"endTime,omitempty"`
+	ReminderID     string        `json:"reminderId"`
+	Location       string        `json:"location,omitempty"`
+	OrganizerName  string        `json:"organizerName,omitempty"`
+	OrganizerEmail string        `json:"organizerEmail,omitempty"`
+	Fullscreen     bool          `json:"fullscreen"`
+	Calendar       string        `json:"calendar,omitempty"`
+	Description    string        `json:"description,omitempty"`
+	HangoutLink    string        `json:"hangoutLink,omitempty"`
+	HtmlLink       string        `json:"htmlLink,omitempty"`
+	Attendees      []attendeeDTO `json:"attendees,omitempty"`
 }
 
 type eventDTO struct {
@@ -251,14 +271,30 @@ func handleState(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	var al *alertDTO
 	if active != nil {
+		attendees := make([]attendeeDTO, 0, len(active.Attendees))
+		for _, a := range active.Attendees {
+			attendees = append(attendees, attendeeDTO{
+				Email:          a.Email,
+				DisplayName:    a.DisplayName,
+				ResponseStatus: a.ResponseStatus,
+				Self:           a.Self,
+				Organizer:      a.Organizer,
+			})
+		}
 		al = &alertDTO{
 			Summary:        active.Summary,
 			StartTime:      active.StartTime,
+			EndTime:        active.EndTime,
 			ReminderID:     active.ReminderID,
 			Location:       active.Location,
 			OrganizerName:  active.OrganizerName,
 			OrganizerEmail: active.OrganizerEmail,
 			Fullscreen:     active.Fullscreen,
+			Calendar:       active.Calendar,
+			Description:    active.Description,
+			HangoutLink:    active.HangoutLink,
+			HtmlLink:       active.HtmlLink,
+			Attendees:      attendees,
 		}
 	}
 	mu.Unlock()
@@ -450,8 +486,10 @@ const indexHTML = `<!doctype html>
   .event .body { padding: 0.25rem 1rem 1rem 2rem; border-top: 1px solid #ccc3; }
   .event .body section { margin-top: 0.75rem; }
   .event .body h3 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; opacity: 0.6; margin: 0 0 0.25rem; }
-  .event .description { white-space: pre-wrap; word-wrap: break-word; font-size: 0.95rem; }
+  .event .description { word-wrap: break-word; font-size: 0.95rem; line-height: 1.4; }
   .event .description a { color: #2a6fdb; }
+  .event .description ul, .event .description ol { padding-left: 1.5rem; }
+  .event .description p { margin: 0.5rem 0; }
   .meet-btn {
     display: inline-block; padding: 0.5rem 1rem; background: #1a73e8; color: white !important;
     text-decoration: none; border-radius: 0.25rem; font-weight: 600; font-size: 0.95rem;
@@ -478,19 +516,42 @@ const indexHTML = `<!doctype html>
     padding: 2rem;
     box-sizing: border-box;
   }
-  .panic .inner { max-width: 90vw; }
-  .panic h1 { font-size: clamp(2rem, 8vw, 5rem); margin: 0 0 1rem; }
-  .panic .when { font-size: clamp(1.25rem, 4vw, 2.5rem); margin-bottom: 1rem; }
-  .panic .sub { font-size: clamp(1rem, 2.5vw, 1.5rem); margin: 0.25rem 0; }
-  .panic button {
-    margin-top: 2rem;
-    font-size: clamp(1rem, 3vw, 2rem);
+  .panic .inner { max-width: 900px; width: 90vw; max-height: 90vh; overflow-y: auto; }
+  .panic h1 { font-size: clamp(2rem, 6vw, 4rem); margin: 0 0 1rem; }
+  .panic .when { font-size: clamp(1.25rem, 3.5vw, 2.25rem); margin-bottom: 1rem; }
+  .panic .sub { font-size: clamp(0.95rem, 2.2vw, 1.35rem); margin: 0.25rem 0; }
+  .panic-actions { display: flex; flex-wrap: wrap; gap: 1rem; justify-content: center; margin: 1.5rem 0; }
+  .panic button, .panic .join-meet {
+    font-size: clamp(1rem, 2.5vw, 1.75rem);
     padding: 0.75rem 2rem;
     font-weight: 700;
-    background: white; color: #c81e1e;
     border: none; border-radius: 0.5rem; cursor: pointer;
+    text-decoration: none; display: inline-block;
   }
+  .panic button { background: white; color: #c81e1e; }
   .panic button:hover { background: #eee; }
+  .panic .join-meet { background: #1a73e8; color: white; }
+  .panic .join-meet:hover { background: #1557b0; }
+  .panic .details {
+    text-align: left;
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 0.5rem;
+    padding: 0.75rem 1rem;
+    margin-top: 1rem;
+    font-size: clamp(0.9rem, 1.8vw, 1.05rem);
+  }
+  .panic .details h3 {
+    font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em;
+    opacity: 0.8; margin: 0 0 0.25rem;
+  }
+  .panic .details section { margin: 0.5rem 0; }
+  .panic .details .description { word-wrap: break-word; max-height: 20vh; overflow-y: auto; line-height: 1.4; }
+  .panic .details .description p { margin: 0.4rem 0; }
+  .panic .details .description ul, .panic .details .description ol { padding-left: 1.25rem; }
+  .panic .details a { color: #ffeaa7; }
+  .panic .attendees { list-style: none; padding: 0; margin: 0; max-height: 20vh; overflow-y: auto; }
+  .panic .attendees li { padding: 0.1rem 0; }
+  .panic .cal-link { font-size: 0.85rem; opacity: 0.9; display: inline-block; margin-top: 0.5rem; }
   @keyframes flash {
     0%, 49% { background: #c81e1e; }
     50%, 100% { background: #961414; }
@@ -544,7 +605,7 @@ function renderEventBody(e) {
     html += '<section><a class="meet-btn" href="' + escapeAttr(e.hangoutLink) + '" target="_blank" rel="noopener">📹 Join Google Meet</a></section>';
   }
   if (e.description) {
-    html += '<section><h3>Description</h3><div class="description">' + linkify(e.description) + '</div></section>';
+    html += '<section><h3>Description</h3><div class="description">' + renderDescription(e.description) + '</div></section>';
   }
   if (e.location) {
     html += '<section><h3>Location</h3><div>' + linkify(e.location) + '</div></section>';
@@ -623,16 +684,49 @@ function renderPanic(state) {
   const a = state.alert;
   const now = new Date(state.now).getTime();
   const startMs = new Date(a.startTime).getTime();
-  const key = "panic:" + a.reminderId + ":" + a.summary;
+  const key = "panic:" + a.reminderId + ":" + a.summary + ":" + (a.hangoutLink || "") + ":" + ((a.attendees || []).length);
   if (key !== lastRendered) {
     const org = a.organizerName || a.organizerEmail || "";
     let html = '<div class="panic"><div class="inner">';
     html += '<h1>' + escapeHtml(a.summary || "Meeting") + '</h1>';
     html += '<div class="when" id="when"></div>';
-    if (org)        html += '<div class="sub">Calendar: ' + escapeHtml(org) + '</div>';
+    if (a.calendar) html += '<div class="sub">📅 ' + escapeHtml(a.calendar) + '</div>';
+    if (org)        html += '<div class="sub">Organizer: ' + escapeHtml(org) + '</div>';
     if (a.location) html += '<div class="sub">Location: ' + escapeHtml(a.location) + '</div>';
-    html += '<div class="sub">Reminder: ' + escapeHtml(a.reminderId) + '</div>';
+    html += '<div class="sub" style="opacity:0.7">Reminder: ' + escapeHtml(a.reminderId) + '</div>';
+
+    html += '<div class="panic-actions">';
+    if (a.hangoutLink) {
+      html += '<a class="join-meet" href="' + escapeAttr(a.hangoutLink) + '" target="_blank" rel="noopener">📹 Join Google Meet</a>';
+    }
     html += '<button id="ackBtn">ACKNOWLEDGE</button>';
+    html += '</div>';
+
+    const hasDetails = a.description || (a.attendees && a.attendees.length) || a.endTime || a.htmlLink;
+    if (hasDetails) {
+      html += '<div class="details">';
+      if (a.description) {
+        html += '<section><h3>Description</h3><div class="description">' + renderDescription(a.description) + '</div></section>';
+      }
+      if (a.attendees && a.attendees.length) {
+        html += '<section><h3>Attendees (' + a.attendees.length + ')</h3><ul class="attendees">';
+        for (const at of a.attendees) {
+          const name = at.displayName || at.email || "(unknown)";
+          const rs = at.responseStatus || "needsAction";
+          const marker = at.self ? " (you)" : at.organizer ? " (organizer)" : "";
+          html += '<li>' + escapeHtml(name) + marker + ' — ' + escapeHtml(rs) + '</li>';
+        }
+        html += '</ul></section>';
+      }
+      if (a.endTime) {
+        html += '<section><h3>Ends</h3><div>' + escapeHtml(fmtDateTime(new Date(a.endTime))) + '</div></section>';
+      }
+      if (a.htmlLink) {
+        html += '<a class="cal-link" href="' + escapeAttr(a.htmlLink) + '" target="_blank" rel="noopener">Open in Google Calendar ↗</a>';
+      }
+      html += '</div>';
+    }
+
     html += '</div></div>';
     root.innerHTML = html;
     lastRendered = key;
@@ -645,7 +739,7 @@ function renderPanic(state) {
   }
   const whenEl = document.getElementById("when");
   if (whenEl) {
-    whenEl.textContent = fmtTime(new Date(a.startTime)) + " — " + relPhrase(startMs, now);
+    whenEl.textContent = fmtDateTime(new Date(a.startTime)) + " — " + relPhrase(startMs, now);
   }
 }
 
@@ -675,6 +769,63 @@ function linkify(s) {
   return escaped.replace(/(https?:\/\/[^\s<]+)/g, url => {
     return '<a href="' + url + '" target="_blank" rel="noopener">' + url + '</a>';
   });
+}
+
+// renderDescription handles both plain text (linkify + newlines → <br>)
+// and HTML (sanitize against an allowlist). Descriptions come from calendar
+// invite senders and must be treated as untrusted input.
+function renderDescription(text) {
+  if (!text) return "";
+  const normalized = text.replace(/\r\n|\r/g, "\n");
+  if (/<[a-z][\s\S]*?>/i.test(normalized)) {
+    return sanitizeHTML(normalized);
+  }
+  return linkify(normalized).replace(/\n/g, "<br>");
+}
+
+const ALLOWED_TAGS = new Set([
+  "a", "b", "strong", "i", "em", "u", "s", "strike", "br", "p", "div", "span",
+  "ul", "ol", "li", "h1", "h2", "h3", "h4", "h5", "h6",
+  "pre", "code", "blockquote", "hr",
+  "table", "thead", "tbody", "tr", "td", "th",
+]);
+
+function sanitizeHTML(unsafe) {
+  const doc = new DOMParser().parseFromString(unsafe, "text/html");
+  walkAndSanitize(doc.body);
+  return doc.body.innerHTML;
+}
+
+function walkAndSanitize(node) {
+  const kids = Array.from(node.childNodes);
+  for (const child of kids) {
+    if (child.nodeType === Node.TEXT_NODE) continue;
+    if (child.nodeType !== Node.ELEMENT_NODE) {
+      node.removeChild(child);
+      continue;
+    }
+    const tag = child.tagName.toLowerCase();
+    if (!ALLOWED_TAGS.has(tag)) {
+      // Unwrap: move children out, drop the element.
+      while (child.firstChild) node.insertBefore(child.firstChild, child);
+      node.removeChild(child);
+      continue;
+    }
+    // Strip every attribute, then re-apply safe ones.
+    const attrs = Array.from(child.attributes);
+    for (const attr of attrs) child.removeAttribute(attr.name);
+    if (tag === "a") {
+      const href = attrs.find(a => a.name.toLowerCase() === "href");
+      if (href && /^(https?:|mailto:)/i.test(href.value.trim())) {
+        child.setAttribute("href", href.value.trim());
+        child.setAttribute("target", "_blank");
+        child.setAttribute("rel", "noopener");
+      }
+      const title = attrs.find(a => a.name.toLowerCase() === "title");
+      if (title) child.setAttribute("title", title.value);
+    }
+    walkAndSanitize(child);
+  }
 }
 
 async function tick() {
