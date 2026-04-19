@@ -468,10 +468,17 @@ func doFetchEventsGoogle(from, to string) ([]Event, error) {
 
 	var allEvents []Event
 	for _, cal := range calendars.Items {
-		events, err := fetchGoogleCalendarEvents(svc, cal.Id, from, to)
+		name := cal.SummaryOverride
+		if name == "" {
+			name = cal.Summary
+		}
+		if name == "" {
+			name = cal.Id
+		}
+		events, err := fetchGoogleCalendarEvents(svc, cal.Id, name, from, to)
 		if err != nil {
 			slog.Warn("Failed to fetch events for calendar, skipping",
-				"calendar", cal.Summary, "error", err)
+				"calendar", name, "error", err)
 			continue
 		}
 		allEvents = append(allEvents, events...)
@@ -488,7 +495,7 @@ func isUnauthorized(err error) bool {
 	return false
 }
 
-func fetchGoogleCalendarEvents(svc *gcal.Service, calendarID, from, to string) ([]Event, error) {
+func fetchGoogleCalendarEvents(svc *gcal.Service, calendarID, calendarName, from, to string) ([]Event, error) {
 	var allEvents []Event
 	pageToken := ""
 
@@ -513,11 +520,33 @@ func fetchGoogleCalendarEvents(svc *gcal.Service, calendarID, from, to string) (
 
 		for _, item := range resp.Items {
 			ev := Event{
-				ID:        item.Id,
-				Summary:   item.Summary,
-				EventType: item.EventType,
-				Location:  item.Location,
-				Status:    item.Status,
+				ID:          item.Id,
+				Summary:     item.Summary,
+				EventType:   item.EventType,
+				Location:    item.Location,
+				Status:      item.Status,
+				Calendar:    calendarName,
+				Description: item.Description,
+				HangoutLink: item.HangoutLink,
+				HtmlLink:    item.HtmlLink,
+			}
+
+			if item.ConferenceData != nil {
+				for _, ep := range item.ConferenceData.EntryPoints {
+					if ep.EntryPointType == "video" && ep.Uri != "" && ev.HangoutLink == "" {
+						ev.HangoutLink = ep.Uri
+					}
+				}
+			}
+
+			for _, a := range item.Attendees {
+				ev.Attendees = append(ev.Attendees, Attendee{
+					Email:          a.Email,
+					DisplayName:    a.DisplayName,
+					ResponseStatus: a.ResponseStatus,
+					Self:           a.Self,
+					Organizer:      a.Organizer,
+				})
 			}
 
 			if item.Organizer != nil {

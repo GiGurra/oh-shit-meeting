@@ -170,10 +170,26 @@ type alertDTO struct {
 }
 
 type eventDTO struct {
-	Summary   string    `json:"summary"`
-	StartTime time.Time `json:"startTime"`
-	Location  string    `json:"location,omitempty"`
-	Organizer string    `json:"organizer,omitempty"`
+	ID          string             `json:"id"`
+	Summary     string             `json:"summary"`
+	StartTime   time.Time          `json:"startTime"`
+	EndTime     time.Time          `json:"endTime,omitempty"`
+	Location    string             `json:"location,omitempty"`
+	Organizer   string             `json:"organizer,omitempty"`
+	Calendar    string             `json:"calendar,omitempty"`
+	Description string             `json:"description,omitempty"`
+	HangoutLink string             `json:"hangoutLink,omitempty"`
+	HtmlLink    string             `json:"htmlLink,omitempty"`
+	Attendees   []attendeeDTO      `json:"attendees,omitempty"`
+	Status      string             `json:"status,omitempty"`
+}
+
+type attendeeDTO struct {
+	Email          string `json:"email,omitempty"`
+	DisplayName    string `json:"displayName,omitempty"`
+	ResponseStatus string `json:"responseStatus,omitempty"`
+	Self           bool   `json:"self,omitempty"`
+	Organizer      bool   `json:"organizer,omitempty"`
 }
 
 type stateDTO struct {
@@ -303,11 +319,33 @@ func upcomingEvents() []eventDTO {
 		if org == "" {
 			org = e.Organizer.Email
 		}
+		var end time.Time
+		if e.End.DateTime != "" {
+			end, _ = time.Parse(time.RFC3339, e.End.DateTime)
+		}
+		attendees := make([]attendeeDTO, 0, len(e.Attendees))
+		for _, a := range e.Attendees {
+			attendees = append(attendees, attendeeDTO{
+				Email:          a.Email,
+				DisplayName:    a.DisplayName,
+				ResponseStatus: a.ResponseStatus,
+				Self:           a.Self,
+				Organizer:      a.Organizer,
+			})
+		}
 		out = append(out, eventDTO{
-			Summary:   e.Summary,
-			StartTime: st,
-			Location:  e.Location,
-			Organizer: org,
+			ID:          e.ID,
+			Summary:     e.Summary,
+			StartTime:   st,
+			EndTime:     end,
+			Location:    e.Location,
+			Organizer:   org,
+			Calendar:    e.Calendar,
+			Description: e.Description,
+			HangoutLink: e.HangoutLink,
+			HtmlLink:    e.HtmlLink,
+			Attendees:   attendees,
+			Status:      e.Status,
 		})
 	}
 	return out
@@ -402,11 +440,33 @@ const indexHTML = `<!doctype html>
   .dashboard h1 { margin-top: 0; }
   .status { color: #1a7f1a; font-weight: 600; }
   .events { list-style: none; padding: 0; }
-  .event { padding: 0.75rem 1rem; border: 1px solid #ccc5; border-radius: 0.5rem; margin-bottom: 0.5rem; }
+  .event { border: 1px solid #ccc5; border-radius: 0.5rem; margin-bottom: 0.5rem; overflow: hidden; }
+  .event > summary { padding: 0.75rem 1rem; cursor: pointer; list-style: none; }
+  .event > summary::-webkit-details-marker { display: none; }
+  .event > summary::before { content: "▸"; display: inline-block; width: 1em; transition: transform 0.15s; opacity: 0.6; }
+  .event[open] > summary::before { transform: rotate(90deg); }
   .event .title { font-weight: 600; font-size: 1.1rem; }
-  .event .meta { font-size: 0.9rem; opacity: 0.8; margin-top: 0.25rem; }
+  .event .meta { font-size: 0.9rem; opacity: 0.8; margin-top: 0.25rem; padding-left: 1em; }
+  .event .body { padding: 0.25rem 1rem 1rem 2rem; border-top: 1px solid #ccc3; }
+  .event .body section { margin-top: 0.75rem; }
+  .event .body h3 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; opacity: 0.6; margin: 0 0 0.25rem; }
+  .event .description { white-space: pre-wrap; word-wrap: break-word; font-size: 0.95rem; }
+  .event .description a { color: #2a6fdb; }
+  .meet-btn {
+    display: inline-block; padding: 0.5rem 1rem; background: #1a73e8; color: white !important;
+    text-decoration: none; border-radius: 0.25rem; font-weight: 600; font-size: 0.95rem;
+  }
+  .meet-btn:hover { background: #1557b0; }
+  .cal-link { font-size: 0.85rem; opacity: 0.8; }
+  .attendees { list-style: none; padding: 0; margin: 0; font-size: 0.9rem; }
+  .attendees li { padding: 0.15rem 0; }
+  .rs-accepted  { color: #1a7f1a; }
+  .rs-declined  { color: #c82828; }
+  .rs-tentative { color: #b88a1a; }
+  .rs-needsAction { opacity: 0.6; }
   .countdown { font-variant-numeric: tabular-nums; }
   .empty { opacity: 0.6; font-style: italic; }
+  .meet-badge { color: #1a73e8; font-weight: 600; }
 
   .panic {
     position: fixed; inset: 0;
@@ -466,36 +526,78 @@ function relPhrase(startMs, nowMs) {
   return "started " + fmtDuration(-diff) + " ago";
 }
 
+function renderEventBody(e) {
+  let html = '<div class="body">';
+  if (e.hangoutLink) {
+    html += '<section><a class="meet-btn" href="' + escapeAttr(e.hangoutLink) + '" target="_blank" rel="noopener">📹 Join Google Meet</a></section>';
+  }
+  if (e.description) {
+    html += '<section><h3>Description</h3><div class="description">' + linkify(e.description) + '</div></section>';
+  }
+  if (e.location) {
+    html += '<section><h3>Location</h3><div>' + linkify(e.location) + '</div></section>';
+  }
+  if (e.attendees && e.attendees.length) {
+    html += '<section><h3>Attendees (' + e.attendees.length + ')</h3><ul class="attendees">';
+    for (const a of e.attendees) {
+      const name = a.displayName || a.email || "(unknown)";
+      const rs = a.responseStatus || "needsAction";
+      const marker = a.self ? " (you)" : a.organizer ? " (organizer)" : "";
+      html += '<li class="rs-' + escapeAttr(rs) + '">' + escapeHtml(name) + marker;
+      if (a.email && a.email !== name) html += ' <span style="opacity:0.6">&lt;' + escapeHtml(a.email) + '&gt;</span>';
+      html += ' — ' + escapeHtml(rs);
+      html += '</li>';
+    }
+    html += '</ul></section>';
+  }
+  if (e.endTime) {
+    html += '<section><h3>Ends</h3><div>' + escapeHtml(fmtTime(new Date(e.endTime))) + '</div></section>';
+  }
+  if (e.htmlLink) {
+    html += '<section><a class="cal-link" href="' + escapeAttr(e.htmlLink) + '" target="_blank" rel="noopener">Open in Google Calendar ↗</a></section>';
+  }
+  html += '</div>';
+  return html;
+}
+
+function eventKey(e) {
+  return (e.id || "") + "|" + (e.summary || "") + "|" + (e.startTime || "") + "|" + (e.hangoutLink || "") + "|" + ((e.attendees || []).length) + "|" + (e.description || "").length + "|" + (e.location || "");
+}
+
 function renderDashboard(state) {
   const upcoming = state.upcoming || [];
   const now = new Date(state.now).getTime();
-  let html = '<div class="dashboard">';
-  html += '<h1>oh-shit-meeting <span class="status">running</span></h1>';
-  html += '<h2>Upcoming</h2>';
-  if (upcoming.length === 0) {
-    html += '<p class="empty">No upcoming events.</p>';
-  } else {
-    html += '<ul class="events">';
-    for (const e of upcoming) {
-      const start = new Date(e.startTime);
-      const startMs = start.getTime();
-      html += '<li class="event">';
-      html += '<div class="title">' + escapeHtml(e.summary || "(no title)") + '</div>';
-      html += '<div class="meta">';
-      html += '<span class="countdown">' + fmtTime(start) + ' — ' + relPhrase(startMs, now) + '</span>';
-      if (e.organizer) html += ' · ' + escapeHtml(e.organizer);
-      if (e.location) html += ' · ' + escapeHtml(e.location);
-      html += '</div></li>';
-    }
-    html += '</ul>';
-  }
-  html += '</div>';
-  const key = "dash:" + upcoming.length + ":" + upcoming.map(e => e.startTime + e.summary).join("|");
+  const key = "dash:" + upcoming.map(eventKey).join(";;");
   if (key !== lastRendered) {
+    let html = '<div class="dashboard">';
+    html += '<h1>oh-shit-meeting <span class="status">running</span></h1>';
+    html += '<h2>Upcoming</h2>';
+    if (upcoming.length === 0) {
+      html += '<p class="empty">No upcoming events.</p>';
+    } else {
+      html += '<ul class="events" style="list-style:none;padding:0">';
+      for (const e of upcoming) {
+        const start = new Date(e.startTime);
+        html += '<li><details class="event"><summary>';
+        html += '<span class="title">' + escapeHtml(e.summary || "(no title)") + '</span>';
+        if (e.hangoutLink) html += ' <span class="meet-badge" title="Has Google Meet">📹</span>';
+        html += '<div class="meta">';
+        html += '<span class="countdown">' + fmtTime(start) + ' — ' + relPhrase(start.getTime(), now) + '</span>';
+        if (e.calendar)  html += ' · 📅 ' + escapeHtml(e.calendar);
+        if (e.organizer) html += ' · ' + escapeHtml(e.organizer);
+        if (e.location)  html += ' · ' + escapeHtml(e.location);
+        html += '</div>';
+        html += '</summary>';
+        html += renderEventBody(e);
+        html += '</details></li>';
+      }
+      html += '</ul>';
+    }
+    html += '</div>';
     root.innerHTML = html;
     lastRendered = key;
   } else {
-    // live-update countdowns without reflow
+    // live-update countdowns without collapsing any open accordion
     const spans = root.querySelectorAll(".countdown");
     upcoming.forEach((e, i) => {
       if (!spans[i]) return;
@@ -552,6 +654,15 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
   }[c]));
+}
+function escapeAttr(s) { return escapeHtml(s); }
+
+// linkify escapes html then turns bare URLs into clickable links.
+function linkify(s) {
+  const escaped = escapeHtml(s);
+  return escaped.replace(/(https?:\/\/[^\s<]+)/g, url => {
+    return '<a href="' + url + '" target="_blank" rel="noopener">' + url + '</a>';
+  });
 }
 
 async function tick() {
