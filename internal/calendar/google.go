@@ -14,7 +14,7 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/zalando/go-keyring"
+	"github.com/gigurra/oh-shit-meeting/internal/secret"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	gcal "google.golang.org/api/calendar/v3"
@@ -97,16 +97,16 @@ func oauthConfigFromClientIDSecret(clientID, clientSecret string) *oauth2.Config
 func resolveOAuthConfig() (*oauth2.Config, error) {
 	cfg := loadAppConfig()
 	if cfg.GoogleClientID != "" {
-		secret, err := keyring.Get(keyringService, keyringClientSecretUser)
-		if err == nil && secret != "" {
-			return oauthConfigFromClientIDSecret(cfg.GoogleClientID, secret), nil
+		clientSecret, err := secret.Get(keyringService, keyringClientSecretUser)
+		if err == nil && clientSecret != "" {
+			return oauthConfigFromClientIDSecret(cfg.GoogleClientID, clientSecret), nil
 		}
 	}
 	return nil, fmt.Errorf("no Google credentials configured — run 'oh-shit-meeting auth'")
 }
 
 func loadToken() (*oauth2.Token, error) {
-	data, err := keyring.Get(keyringService, keyringUser)
+	data, err := secret.Get(keyringService, keyringUser)
 	if err != nil {
 		return nil, err
 	}
@@ -122,12 +122,12 @@ func saveToken(tok *oauth2.Token) error {
 	if err != nil {
 		return err
 	}
-	return keyring.Set(keyringService, keyringUser, string(data))
+	return secret.Set(keyringService, keyringUser, string(data))
 }
 
-// HasGoogleToken returns true if a saved OAuth token exists in the keychain.
+// HasGoogleToken returns true if a saved OAuth token exists.
 func HasGoogleToken() bool {
-	_, err := keyring.Get(keyringService, keyringUser)
+	_, err := secret.Get(keyringService, keyringUser)
 	return err == nil
 }
 
@@ -140,6 +140,10 @@ type TokenStatus struct {
 	HasCredentials  bool
 	ClientID        string
 	AuthenticatedAt time.Time
+	// TokenLocation and CredentialsLocation report where the token and
+	// client secret are actually stored ("keychain", "file (...)", or "").
+	TokenLocation       string
+	CredentialsLocation string
 }
 
 // TokenAge returns how long ago the last authentication was, or zero if unknown.
@@ -204,14 +208,16 @@ func GetTokenStatus() TokenStatus {
 		status.TokenType = tok.TokenType
 		status.Expiry = tok.Expiry
 		status.HasRefreshToken = tok.RefreshToken != ""
+		status.TokenLocation = secret.Location(keyringService, keyringUser)
 	}
 
 	cfg := loadAppConfig()
 	if cfg.GoogleClientID != "" {
-		secret, err := keyring.Get(keyringService, keyringClientSecretUser)
-		if err == nil && secret != "" {
+		clientSecret, err := secret.Get(keyringService, keyringClientSecretUser)
+		if err == nil && clientSecret != "" {
 			status.HasCredentials = true
 			status.ClientID = cfg.GoogleClientID
+			status.CredentialsLocation = secret.Location(keyringService, keyringClientSecretUser)
 		}
 	}
 	if cfg.AuthenticatedAt != "" {
@@ -229,8 +235,8 @@ func HasGoogleCredentials() bool {
 	if cfg.GoogleClientID == "" {
 		return false
 	}
-	secret, err := keyring.Get(keyringService, keyringClientSecretUser)
-	return err == nil && secret != ""
+	clientSecret, err := secret.Get(keyringService, keyringClientSecretUser)
+	return err == nil && clientSecret != ""
 }
 
 // ReAuthenticate re-runs the OAuth2 flow using previously stored credentials.
@@ -262,9 +268,9 @@ func Authenticate(credentialsPath string) error {
 		return err
 	}
 
-	// Store client ID/secret from the file into keychain
-	if err := keyring.Set(keyringService, keyringClientSecretUser, oauthCfg.ClientSecret); err != nil {
-		return fmt.Errorf("save client secret to keychain: %w", err)
+	// Store client ID/secret from the file
+	if err := secret.Set(keyringService, keyringClientSecretUser, oauthCfg.ClientSecret); err != nil {
+		return fmt.Errorf("save client secret: %w", err)
 	}
 	cfg := loadAppConfig()
 	cfg.GoogleClientID = oauthCfg.ClientID
@@ -283,9 +289,9 @@ func AuthenticateWithClientIDSecret(clientID, clientSecret string) error {
 		return err
 	}
 
-	// Save client secret to keychain
-	if err := keyring.Set(keyringService, keyringClientSecretUser, clientSecret); err != nil {
-		return fmt.Errorf("save client secret to keychain: %w", err)
+	// Save client secret
+	if err := secret.Set(keyringService, keyringClientSecretUser, clientSecret); err != nil {
+		return fmt.Errorf("save client secret: %w", err)
 	}
 
 	// Save client ID to config (not secret — it's in keychain)
@@ -356,16 +362,23 @@ func doBrowserAuth(oauthCfg *oauth2.Config) error {
 	}
 
 	if err := saveToken(tok); err != nil {
-		return fmt.Errorf("save token to keychain: %w", err)
+		return fmt.Errorf("save token: %w", err)
 	}
 
-	fmt.Println("Token saved to system keychain.")
+	switch loc := secret.Location(keyringService, keyringUser); loc {
+	case "keychain":
+		fmt.Println("Token saved to system keychain.")
+	case "":
+		fmt.Println("Token saved.")
+	default:
+		fmt.Printf("Token saved to %s.\n", loc)
+	}
 	return nil
 }
 
-// Logout removes the stored OAuth2 token from the system keychain.
+// Logout removes the stored OAuth2 token from any backing store.
 func Logout() error {
-	return keyring.Delete(keyringService, keyringUser)
+	return secret.Delete(keyringService, keyringUser)
 }
 
 func openBrowser(url string) {

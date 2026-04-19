@@ -2,93 +2,29 @@ package gui
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"image"
 	"image/color"
 	"image/png"
+	"log/slog"
+	"net"
+	"net/http"
+	"os/exec"
+	"runtime"
+	"sync"
 	"time"
 
-	"fyne.io/fyne/v2"
-	"fyne.io/fyne/v2/app"
-	"fyne.io/fyne/v2/canvas"
-	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/driver/desktop"
-	"fyne.io/fyne/v2/widget"
-	"github.com/gigurra/oh-shit-meeting/internal/format"
+	"fyne.io/systray"
+	"github.com/gigurra/oh-shit-meeting/internal/calendar"
 	"github.com/gigurra/oh-shit-meeting/internal/sound"
 )
 
-var (
-	fyneApp   fyne.App
-	deskApp   desktop.App
-	greenIcon fyne.Resource
-	redIcon   fyne.Resource
-)
-
-// Init initializes the Fyne app with a systray icon (no hidden window needed)
-func Init() {
-	fyneApp = app.NewWithID("com.gigurra.oh-shit-meeting")
-
-	greenIcon = createCircleIcon(color.RGBA{R: 30, G: 180, B: 30, A: 255})
-	redIcon = createCircleIcon(color.RGBA{R: 200, G: 30, B: 30, A: 255})
-
-	fyneApp.SetIcon(greenIcon)
-
-	if desk, ok := fyneApp.(desktop.App); ok {
-		deskApp = desk
-
-		titleItem := fyne.NewMenuItem("oh-shit-meeting", nil)
-		titleItem.Disabled = true
-
-		menu := fyne.NewMenu("",
-			titleItem,
-			fyne.NewMenuItemSeparator(),
-			fyne.NewMenuItem("Quit", func() {
-				fyneApp.Quit()
-			}),
-		)
-		desk.SetSystemTrayMenu(menu)
-		desk.SetSystemTrayIcon(greenIcon)
-	}
+type Config struct {
+	Port     int
+	EventsFn func() []calendar.Event
 }
 
-// Run starts the Fyne event loop (blocks)
-func Run() {
-	fyneApp.Run()
-}
-
-
-// createCircleIcon creates a circle icon with the given color
-func createCircleIcon(c color.RGBA) fyne.Resource {
-	size := 22
-	img := image.NewRGBA(image.Rect(0, 0, size, size))
-
-	center := float64(size) / 2
-	radius := float64(size)/2 - 1
-
-	for y := 0; y < size; y++ {
-		for x := 0; x < size; x++ {
-			dx := float64(x) - center + 0.5
-			dy := float64(y) - center + 0.5
-			if dx*dx+dy*dy <= radius*radius {
-				img.Set(x, y, c)
-			}
-		}
-	}
-
-	var buf bytes.Buffer
-	err := png.Encode(&buf, img)
-	if err != nil {
-		panic(fmt.Sprintf("failed to encode icon: %v", err))
-	}
-
-	return &fyne.StaticResource{
-		StaticName:    "tray-icon.png",
-		StaticContent: buf.Bytes(),
-	}
-}
-
-// ReminderInfo contains info needed to display a reminder popup
 type ReminderInfo struct {
 	Summary        string
 	StartTime      time.Time
@@ -101,178 +37,451 @@ type ReminderInfo struct {
 	Fullscreen     bool
 }
 
-// ShowPopupBlocking displays a popup and blocks until it's acknowledged
+var (
+	mu         sync.Mutex
+	active     *ReminderInfo
+	activeDone chan struct{}
+	cfg        Config
+	greenIcon  []byte
+	redIcon    []byte
+)
+
+// Init prepares icons and starts the local HTTP server.
+// Safe to call once before Run.
+func Init(c Config) error {
+	cfg = c
+	greenIcon = makeIconPNG(color.RGBA{R: 30, G: 180, B: 30, A: 255})
+	redIcon = makeIconPNG(color.RGBA{R: 200, G: 30, B: 30, A: 255})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", handleIndex)
+	mux.HandleFunc("/state", handleState)
+	mux.HandleFunc("/ack", handleAck)
+
+	addr := fmt.Sprintf("127.0.0.1:%d", cfg.Port)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("bind %s: %w", addr, err)
+	}
+	slog.Info("dashboard listening", "url", "http://"+addr)
+	go func() {
+		if err := http.Serve(ln, mux); err != nil {
+			slog.Error("http serve failed", "error", err)
+		}
+	}()
+	return nil
+}
+
+// Run blocks on the systray main loop. Must be called from the main goroutine.
+func Run() {
+	systray.Run(onReady, func() {})
+}
+
+func onReady() {
+	systray.SetIcon(greenIcon)
+	systray.SetTitle("")
+	systray.SetTooltip("oh-shit-meeting — " + dashURL())
+
+	mTitle := systray.AddMenuItem("oh-shit-meeting", "")
+	mTitle.Disable()
+	systray.AddSeparator()
+	mOpen := systray.AddMenuItem("Open dashboard", dashURL())
+	systray.AddSeparator()
+	mQuit := systray.AddMenuItem("Quit", "Quit oh-shit-meeting")
+
+	go func() {
+		for {
+			select {
+			case <-mOpen.ClickedCh:
+				if err := openBrowser(dashURL()); err != nil {
+					slog.Warn("failed to open browser", "error", err)
+				}
+			case <-mQuit.ClickedCh:
+				systray.Quit()
+				return
+			}
+		}
+	}()
+}
+
+func dashURL() string {
+	return fmt.Sprintf("http://127.0.0.1:%d/", cfg.Port)
+}
+
+// ShowPopupBlocking sets the active alert, pops the dashboard to front, and
+// blocks until /ack is called for this reminder.
 func ShowPopupBlocking(info ReminderInfo) {
 	done := make(chan struct{})
+	mu.Lock()
+	active = &info
+	activeDone = done
+	mu.Unlock()
 
-	fyne.Do(func() {
-		sound.StartLoop(info.Sound)
+	sound.StartLoop(info.Sound)
+	go flashTray(done)
+	if err := openBrowser(dashURL()); err != nil {
+		slog.Warn("failed to open browser", "error", err)
+	}
 
-		w := fyneApp.NewWindow("MEETING REMINDER")
-
-		// Red background
-		bg := canvas.NewRectangle(color.RGBA{R: 200, G: 30, B: 30, A: 255})
-
-		// Event title
-		title := canvas.NewText(info.Summary, color.White)
-		title.TextSize = 48
-		title.TextStyle = fyne.TextStyle{Bold: true}
-		title.Alignment = fyne.TextAlignCenter
-
-		// Time info
-		timeText := canvas.NewText(
-			formatTimeText(info.TimeUntil, info.StartTime),
-			color.White,
-		)
-		timeText.TextSize = 32
-		timeText.Alignment = fyne.TextAlignCenter
-
-		// Calendar/organizer info
-		calendarName := info.OrganizerName
-		if calendarName == "" {
-			calendarName = info.OrganizerEmail
-		}
-		calendarText := canvas.NewText(fmt.Sprintf("Calendar: %s", calendarName), color.White)
-		calendarText.TextSize = 24
-		calendarText.Alignment = fyne.TextAlignCenter
-
-		// Location if present
-		var locationText *canvas.Text
-		if info.Location != "" {
-			locationText = canvas.NewText(fmt.Sprintf("Location: %s", info.Location), color.White)
-			locationText.TextSize = 20
-			locationText.Alignment = fyne.TextAlignCenter
-		}
-
-		// Reminder source
-		sourceText := canvas.NewText(fmt.Sprintf("Reminder: %s", info.ReminderID), color.White)
-		sourceText.TextSize = 18
-		sourceText.Alignment = fyne.TextAlignCenter
-
-		// ACK button - closes popup and unblocks
-		ackBtn := widget.NewButton("ACKNOWLEDGE", func() {
-			sound.StopLoop()
-			w.Close()
-			close(done)
-		})
-
-		// Build content
-		var content *fyne.Container
-		if locationText != nil {
-			content = container.NewVBox(
-				title,
-				widget.NewSeparator(),
-				timeText,
-				calendarText,
-				locationText,
-				sourceText,
-				widget.NewSeparator(),
-				ackBtn,
-			)
-		} else {
-			content = container.NewVBox(
-				title,
-				widget.NewSeparator(),
-				timeText,
-				calendarText,
-				sourceText,
-				widget.NewSeparator(),
-				ackBtn,
-			)
-		}
-
-		// Center the content
-		centered := container.NewCenter(content)
-
-		// Stack background and content
-		stack := container.NewStack(bg, centered)
-
-		w.SetContent(stack)
-		if info.Fullscreen {
-			w.SetFullScreen(true)
-		} else {
-			w.Resize(fyne.NewSize(800, 400))
-			w.CenterOnScreen()
-		}
-		w.Show()
-
-		// Start flashing effects (background and tray icon)
-		go flashAlertEffects(bg, done)
-
-		// Start countdown timer update
-		go updateCountdown(timeText, info.StartTime, done)
-	})
-
-	// Block until popup is acknowledged
 	<-done
+	sound.StopLoop()
 
-	// Delay to let UI settle before potentially showing another popup.
-	// Fullscreen needs longer because macOS animates back to the previous desktop.
-	if info.Fullscreen {
-		time.Sleep(3 * time.Second)
-	} else {
-		time.Sleep(100 * time.Millisecond)
-	}
+	mu.Lock()
+	active = nil
+	activeDone = nil
+	mu.Unlock()
+
+	// Let UI settle before a potential next alert
+	time.Sleep(100 * time.Millisecond)
 }
 
-func updateCountdown(timeText *canvas.Text, startTime time.Time, done <-chan struct{}) {
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-done:
-			return
-		case <-ticker.C:
-			remaining := time.Until(startTime)
-			fyne.Do(func() {
-				timeText.Text = formatTimeText(remaining, startTime)
-				timeText.Refresh()
-			})
-		}
-	}
-}
-
-func formatTimeText(timeUntil time.Duration, startTime time.Time) string {
-	if timeUntil < 0 {
-		return fmt.Sprintf("Started %s ago (at %s)", format.Duration(timeUntil), startTime.Local().Format("15:04"))
-	}
-	return fmt.Sprintf("Starts in %s (at %s)", format.Duration(timeUntil), startTime.Local().Format("15:04"))
-}
-
-func flashAlertEffects(bg *canvas.Rectangle, done <-chan struct{}) {
+func flashTray(done <-chan struct{}) {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
-
-	bright := true
+	red := false
 	for {
 		select {
 		case <-done:
-			if deskApp != nil {
-				deskApp.SetSystemTrayIcon(greenIcon)
-			}
+			systray.SetIcon(greenIcon)
 			return
 		case <-ticker.C:
-			// Flash background color
-			bgColor := color.RGBA{R: 200, G: 30, B: 30, A: 255}
-			if bright {
-				bgColor = color.RGBA{R: 150, G: 20, B: 20, A: 255}
+			if red {
+				systray.SetIcon(greenIcon)
+			} else {
+				systray.SetIcon(redIcon)
 			}
-			fyne.Do(func() {
-				bg.FillColor = bgColor
-				bg.Refresh()
-			})
-
-			// Flash tray icon (red when background is bright)
-			if deskApp != nil {
-				if bright {
-					deskApp.SetSystemTrayIcon(greenIcon)
-				} else {
-					deskApp.SetSystemTrayIcon(redIcon)
-				}
-			}
-
-			bright = !bright
+			red = !red
 		}
 	}
 }
+
+// ---------------- HTTP handlers ----------------
+
+type alertDTO struct {
+	Summary        string    `json:"summary"`
+	StartTime      time.Time `json:"startTime"`
+	ReminderID     string    `json:"reminderId"`
+	Location       string    `json:"location,omitempty"`
+	OrganizerName  string    `json:"organizerName,omitempty"`
+	OrganizerEmail string    `json:"organizerEmail,omitempty"`
+	Fullscreen     bool      `json:"fullscreen"`
+}
+
+type eventDTO struct {
+	Summary   string    `json:"summary"`
+	StartTime time.Time `json:"startTime"`
+	Location  string    `json:"location,omitempty"`
+	Organizer string    `json:"organizer,omitempty"`
+}
+
+type stateDTO struct {
+	Alert    *alertDTO  `json:"alert,omitempty"`
+	Upcoming []eventDTO `json:"upcoming"`
+	Now      time.Time  `json:"now"`
+}
+
+func handleIndex(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write([]byte(indexHTML))
+}
+
+func handleState(w http.ResponseWriter, r *http.Request) {
+	mu.Lock()
+	var al *alertDTO
+	if active != nil {
+		al = &alertDTO{
+			Summary:        active.Summary,
+			StartTime:      active.StartTime,
+			ReminderID:     active.ReminderID,
+			Location:       active.Location,
+			OrganizerName:  active.OrganizerName,
+			OrganizerEmail: active.OrganizerEmail,
+			Fullscreen:     active.Fullscreen,
+		}
+	}
+	mu.Unlock()
+
+	resp := stateDTO{
+		Alert:    al,
+		Upcoming: upcomingEvents(),
+		Now:      time.Now(),
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func handleAck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	id := r.URL.Query().Get("id")
+	mu.Lock()
+	defer mu.Unlock()
+	if active == nil || activeDone == nil {
+		http.Error(w, "no active alert", http.StatusConflict)
+		return
+	}
+	if id != "" && id != active.ReminderID {
+		http.Error(w, "alert id mismatch", http.StatusConflict)
+		return
+	}
+	close(activeDone)
+	activeDone = nil
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func upcomingEvents() []eventDTO {
+	if cfg.EventsFn == nil {
+		return nil
+	}
+	events := cfg.EventsFn()
+	out := make([]eventDTO, 0, len(events))
+	cutoff := time.Now().Add(-15 * time.Minute)
+	for _, e := range events {
+		if e.Start.DateTime == "" {
+			continue
+		}
+		st, err := time.Parse(time.RFC3339, e.Start.DateTime)
+		if err != nil {
+			continue
+		}
+		if st.Before(cutoff) {
+			continue
+		}
+		org := e.Organizer.DisplayName
+		if org == "" {
+			org = e.Organizer.Email
+		}
+		out = append(out, eventDTO{
+			Summary:   e.Summary,
+			StartTime: st,
+			Location:  e.Location,
+			Organizer: org,
+		})
+	}
+	return out
+}
+
+// ---------------- helpers ----------------
+
+func openBrowser(url string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("cmd", "/c", "start", "", url)
+	case "darwin":
+		cmd = exec.Command("open", url)
+	default:
+		cmd = exec.Command("xdg-open", url)
+	}
+	return cmd.Start()
+}
+
+func makeIconPNG(c color.RGBA) []byte {
+	size := 22
+	img := image.NewRGBA(image.Rect(0, 0, size, size))
+	center := float64(size) / 2
+	radius := float64(size)/2 - 1
+	for y := 0; y < size; y++ {
+		for x := 0; x < size; x++ {
+			dx := float64(x) - center + 0.5
+			dy := float64(y) - center + 0.5
+			if dx*dx+dy*dy <= radius*radius {
+				img.Set(x, y, c)
+			}
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		panic(fmt.Sprintf("failed to encode icon: %v", err))
+	}
+	return buf.Bytes()
+}
+
+// ---------------- embedded HTML ----------------
+
+const indexHTML = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>oh-shit-meeting</title>
+<style>
+  :root { color-scheme: light dark; }
+  html, body { margin: 0; padding: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  body { min-height: 100vh; }
+  .dashboard { padding: 2rem; max-width: 900px; margin: 0 auto; }
+  .dashboard h1 { margin-top: 0; }
+  .status { color: #1a7f1a; font-weight: 600; }
+  .events { list-style: none; padding: 0; }
+  .event { padding: 0.75rem 1rem; border: 1px solid #ccc5; border-radius: 0.5rem; margin-bottom: 0.5rem; }
+  .event .title { font-weight: 600; font-size: 1.1rem; }
+  .event .meta { font-size: 0.9rem; opacity: 0.8; margin-top: 0.25rem; }
+  .countdown { font-variant-numeric: tabular-nums; }
+  .empty { opacity: 0.6; font-style: italic; }
+
+  .panic {
+    position: fixed; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: #c81e1e;
+    color: white;
+    animation: flash 1s infinite;
+    text-align: center;
+    padding: 2rem;
+    box-sizing: border-box;
+  }
+  .panic .inner { max-width: 90vw; }
+  .panic h1 { font-size: clamp(2rem, 8vw, 5rem); margin: 0 0 1rem; }
+  .panic .when { font-size: clamp(1.25rem, 4vw, 2.5rem); margin-bottom: 1rem; }
+  .panic .sub { font-size: clamp(1rem, 2.5vw, 1.5rem); margin: 0.25rem 0; }
+  .panic button {
+    margin-top: 2rem;
+    font-size: clamp(1rem, 3vw, 2rem);
+    padding: 0.75rem 2rem;
+    font-weight: 700;
+    background: white; color: #c81e1e;
+    border: none; border-radius: 0.5rem; cursor: pointer;
+  }
+  .panic button:hover { background: #eee; }
+  @keyframes flash {
+    0%, 49% { background: #c81e1e; }
+    50%, 100% { background: #961414; }
+  }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+const root = document.getElementById("root");
+let lastRendered = "";
+let wasFullscreen = false;
+
+function fmtDuration(ms) {
+  const abs = Math.abs(ms);
+  const sign = ms < 0 ? "-" : "";
+  const totalSec = Math.floor(abs / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  const pad = n => String(n).padStart(2, "0");
+  if (h > 0) return sign + h + "h " + pad(m) + "m " + pad(s) + "s";
+  return sign + m + "m " + pad(s) + "s";
+}
+
+function fmtTime(d) {
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function relPhrase(startMs, nowMs) {
+  const diff = startMs - nowMs;
+  if (diff >= 0) return "starts in " + fmtDuration(diff);
+  return "started " + fmtDuration(-diff) + " ago";
+}
+
+function renderDashboard(state) {
+  const upcoming = state.upcoming || [];
+  const now = new Date(state.now).getTime();
+  let html = '<div class="dashboard">';
+  html += '<h1>oh-shit-meeting <span class="status">running</span></h1>';
+  html += '<h2>Upcoming</h2>';
+  if (upcoming.length === 0) {
+    html += '<p class="empty">No upcoming events.</p>';
+  } else {
+    html += '<ul class="events">';
+    for (const e of upcoming) {
+      const start = new Date(e.startTime);
+      const startMs = start.getTime();
+      html += '<li class="event">';
+      html += '<div class="title">' + escapeHtml(e.summary || "(no title)") + '</div>';
+      html += '<div class="meta">';
+      html += '<span class="countdown">' + fmtTime(start) + ' — ' + relPhrase(startMs, now) + '</span>';
+      if (e.organizer) html += ' · ' + escapeHtml(e.organizer);
+      if (e.location) html += ' · ' + escapeHtml(e.location);
+      html += '</div></li>';
+    }
+    html += '</ul>';
+  }
+  html += '</div>';
+  const key = "dash:" + upcoming.length + ":" + upcoming.map(e => e.startTime + e.summary).join("|");
+  if (key !== lastRendered) {
+    root.innerHTML = html;
+    lastRendered = key;
+  } else {
+    // live-update countdowns without reflow
+    const spans = root.querySelectorAll(".countdown");
+    upcoming.forEach((e, i) => {
+      if (!spans[i]) return;
+      const start = new Date(e.startTime);
+      spans[i].textContent = fmtTime(start) + ' — ' + relPhrase(start.getTime(), now);
+    });
+  }
+}
+
+function renderPanic(state) {
+  const a = state.alert;
+  const now = new Date(state.now).getTime();
+  const startMs = new Date(a.startTime).getTime();
+  const key = "panic:" + a.reminderId + ":" + a.summary;
+  if (key !== lastRendered) {
+    const org = a.organizerName || a.organizerEmail || "";
+    let html = '<div class="panic"><div class="inner">';
+    html += '<h1>' + escapeHtml(a.summary || "Meeting") + '</h1>';
+    html += '<div class="when" id="when"></div>';
+    if (org)        html += '<div class="sub">Calendar: ' + escapeHtml(org) + '</div>';
+    if (a.location) html += '<div class="sub">Location: ' + escapeHtml(a.location) + '</div>';
+    html += '<div class="sub">Reminder: ' + escapeHtml(a.reminderId) + '</div>';
+    html += '<button id="ackBtn">ACKNOWLEDGE</button>';
+    html += '</div></div>';
+    root.innerHTML = html;
+    lastRendered = key;
+    document.getElementById("ackBtn").addEventListener("click", () => ack(a.reminderId));
+    if (a.fullscreen && !wasFullscreen) {
+      wasFullscreen = true;
+      // best-effort — browsers may reject without a user gesture
+      document.documentElement.requestFullscreen?.().catch(() => {});
+    }
+  }
+  const whenEl = document.getElementById("when");
+  if (whenEl) {
+    whenEl.textContent = fmtTime(new Date(a.startTime)) + " — " + relPhrase(startMs, now);
+  }
+}
+
+async function ack(id) {
+  try {
+    await fetch("/ack?id=" + encodeURIComponent(id), { method: "POST" });
+  } catch (e) { /* ignore */ }
+  if (document.fullscreenElement) {
+    document.exitFullscreen?.().catch(() => {});
+  }
+  wasFullscreen = false;
+  // Force-refresh so the view flips away from panic mode immediately,
+  // without waiting for the next 1-second poll.
+  tick();
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[c]));
+}
+
+async function tick() {
+  try {
+    const r = await fetch("/state", { cache: "no-store" });
+    const s = await r.json();
+    if (s.alert) renderPanic(s);
+    else renderDashboard(s);
+  } catch (e) { /* ignore */ }
+}
+
+tick();
+setInterval(tick, 1000);
+</script>
+</body>
+</html>
+`
