@@ -470,6 +470,7 @@ const indexHTML = `<!doctype html>
 <title>oh-shit-meeting</title>
 <style>
   :root { color-scheme: light dark; }
+  html { scrollbar-gutter: stable; }
   html, body { margin: 0; padding: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
   body { min-height: 100vh; }
   .dashboard { padding: 2rem; max-width: 900px; margin: 0 auto; }
