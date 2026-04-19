@@ -508,16 +508,28 @@ function fmtDuration(ms) {
   const abs = Math.abs(ms);
   const sign = ms < 0 ? "-" : "";
   const totalSec = Math.floor(abs / 1000);
-  const h = Math.floor(totalSec / 3600);
+  const d = Math.floor(totalSec / 86400);
+  const h = Math.floor((totalSec % 86400) / 3600);
   const m = Math.floor((totalSec % 3600) / 60);
   const s = totalSec % 60;
   const pad = n => String(n).padStart(2, "0");
+  if (d > 0) return sign + d + "d " + h + "h " + pad(m) + "m";
   if (h > 0) return sign + h + "h " + pad(m) + "m " + pad(s) + "s";
   return sign + m + "m " + pad(s) + "s";
 }
 
 function fmtTime(d) {
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function fmtDateTime(d) {
+  return d.toLocaleString([], {
+    weekday: "short",
+    day: "2-digit",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function relPhrase(startMs, nowMs) {
@@ -551,7 +563,7 @@ function renderEventBody(e) {
     html += '</ul></section>';
   }
   if (e.endTime) {
-    html += '<section><h3>Ends</h3><div>' + escapeHtml(fmtTime(new Date(e.endTime))) + '</div></section>';
+    html += '<section><h3>Ends</h3><div>' + escapeHtml(fmtDateTime(new Date(e.endTime))) + '</div></section>';
   }
   if (e.htmlLink) {
     html += '<section><a class="cal-link" href="' + escapeAttr(e.htmlLink) + '" target="_blank" rel="noopener">Open in Google Calendar ↗</a></section>';
@@ -582,7 +594,7 @@ function renderDashboard(state) {
         html += '<span class="title">' + escapeHtml(e.summary || "(no title)") + '</span>';
         if (e.hangoutLink) html += ' <span class="meet-badge" title="Has Google Meet">📹</span>';
         html += '<div class="meta">';
-        html += '<span class="countdown">' + fmtTime(start) + ' — ' + relPhrase(start.getTime(), now) + '</span>';
+        html += '<span class="countdown">' + fmtDateTime(start) + ' — ' + relPhrase(start.getTime(), now) + '</span>';
         if (e.calendar)  html += ' · 📅 ' + escapeHtml(e.calendar);
         if (e.organizer) html += ' · ' + escapeHtml(e.organizer);
         if (e.location)  html += ' · ' + escapeHtml(e.location);
@@ -602,7 +614,7 @@ function renderDashboard(state) {
     upcoming.forEach((e, i) => {
       if (!spans[i]) return;
       const start = new Date(e.startTime);
-      spans[i].textContent = fmtTime(start) + ' — ' + relPhrase(start.getTime(), now);
+      spans[i].textContent = fmtDateTime(start) + ' — ' + relPhrase(start.getTime(), now);
     });
   }
 }
