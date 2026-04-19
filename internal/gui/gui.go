@@ -2,6 +2,7 @@ package gui
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -50,8 +51,8 @@ var (
 // Safe to call once before Run.
 func Init(c Config) error {
 	cfg = c
-	greenIcon = makeIconPNG(color.RGBA{R: 30, G: 180, B: 30, A: 255})
-	redIcon = makeIconPNG(color.RGBA{R: 200, G: 30, B: 30, A: 255})
+	greenIcon = makeTrayIcon(color.RGBA{R: 30, G: 180, B: 30, A: 255})
+	redIcon = makeTrayIcon(color.RGBA{R: 200, G: 30, B: 30, A: 255})
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", handleIndex)
@@ -282,6 +283,16 @@ func openBrowser(url string) error {
 	return cmd.Start()
 }
 
+// makeTrayIcon returns platform-appropriate icon bytes: ICO on Windows
+// (which Shell_NotifyIcon requires), PNG elsewhere.
+func makeTrayIcon(c color.RGBA) []byte {
+	pngBytes := makeIconPNG(c)
+	if runtime.GOOS == "windows" {
+		return pngToICO(pngBytes, 22)
+	}
+	return pngBytes
+}
+
 func makeIconPNG(c color.RGBA) []byte {
 	size := 22
 	img := image.NewRGBA(image.Rect(0, 0, size, size))
@@ -300,6 +311,34 @@ func makeIconPNG(c color.RGBA) []byte {
 	if err := png.Encode(&buf, img); err != nil {
 		panic(fmt.Sprintf("failed to encode icon: %v", err))
 	}
+	return buf.Bytes()
+}
+
+// pngToICO wraps a PNG in a single-image ICO container. Windows Vista+
+// accepts PNG-inside-ICO for icons ≥ 48×48 and works fine for smaller too.
+// size is the pixel dimension of the PNG (use 0 to mean 256).
+func pngToICO(pngBytes []byte, size int) []byte {
+	var b uint8
+	if size >= 256 {
+		b = 0
+	} else {
+		b = uint8(size)
+	}
+	var buf bytes.Buffer
+	// ICONDIR
+	binary.Write(&buf, binary.LittleEndian, uint16(0)) // reserved
+	binary.Write(&buf, binary.LittleEndian, uint16(1)) // type = 1 (ICO)
+	binary.Write(&buf, binary.LittleEndian, uint16(1)) // image count
+	// ICONDIRENTRY
+	buf.WriteByte(b)                                            // width
+	buf.WriteByte(b)                                            // height
+	buf.WriteByte(0)                                            // color palette
+	buf.WriteByte(0)                                            // reserved
+	binary.Write(&buf, binary.LittleEndian, uint16(1))          // color planes
+	binary.Write(&buf, binary.LittleEndian, uint16(32))         // bits per pixel
+	binary.Write(&buf, binary.LittleEndian, uint32(len(pngBytes))) // image size
+	binary.Write(&buf, binary.LittleEndian, uint32(22))         // image offset
+	buf.Write(pngBytes)
 	return buf.Bytes()
 }
 
