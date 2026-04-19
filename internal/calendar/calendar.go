@@ -32,6 +32,22 @@ type Event struct {
 	Status    string    `json:"status"`
 	Reminders Reminders `json:"reminders"`
 	Organizer Organizer `json:"organizer,omitempty"`
+	// Calendar is the human-readable name of the source calendar
+	// (display override > summary > id). Populated by the native Google
+	// backend; left empty by gws/gog backends.
+	Calendar    string     `json:"calendar,omitempty"`
+	Description string     `json:"description,omitempty"`
+	HangoutLink string     `json:"hangoutLink,omitempty"`
+	HtmlLink    string     `json:"htmlLink,omitempty"`
+	Attendees   []Attendee `json:"attendees,omitempty"`
+}
+
+type Attendee struct {
+	Email          string `json:"email,omitempty"`
+	DisplayName    string `json:"displayName,omitempty"`
+	ResponseStatus string `json:"responseStatus,omitempty"`
+	Self           bool   `json:"self,omitempty"`
+	Organizer      bool   `json:"organizer,omitempty"`
 }
 
 type Organizer struct {

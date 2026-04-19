@@ -20,33 +20,61 @@ import (
 	"github.com/gigurra/oh-shit-meeting/internal/format"
 	"github.com/gigurra/oh-shit-meeting/internal/gui"
 	"github.com/gigurra/oh-shit-meeting/internal/reminder"
+	"github.com/gigurra/oh-shit-meeting/internal/secret"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
 
+// CommonParams is embedded into every command so the insecure-storage flag
+// is available everywhere that touches secrets.
+type CommonParams struct {
+	AcceptInsecureSecretStorage bool `descr:"Fall back to a plaintext file (~/.config/oh-shit-meeting/secrets.json) when the system keychain is unavailable" default:"false"`
+}
+
 type Params struct {
+	CommonParams
 	PollInterval time.Duration `descr:"How often to poll Google Calendar for events" default:"5m"`
 	WarnBefore   time.Duration `descr:"Global alert time before meeting" default:"5m"`
 	Sound        string        `descr:"Alert sound (none, or system sound name like Glass, Hero, Funk)" default:"Hero"`
 	Fullscreen   bool          `descr:"Show alerts in fullscreen mode for maximum obnoxiousness" default:"false"`
 	Backend       string        `descr:"Calendar backend to use" default:"auto" alts:"auto,google,gws,gog"`
 	LookaheadDays int           `descr:"How many days ahead to look for events" default:"3"`
+	Port          int           `descr:"Port for the local dashboard HTTP server" default:"47448"`
+	DisplayTestAlert bool       `descr:"Fire a synthetic alert and exit when acknowledged (for testing)" default:"false"`
 }
 
 type ListEventsParams struct {
+	CommonParams
 	Backend       string `descr:"Calendar backend to use" default:"auto" alts:"auto,google,gws,gog"`
 	Json          bool   `descr:"Output as JSON" default:"false"`
 	LookaheadDays int    `descr:"How many days ahead to look for events" default:"3"`
 }
 
 type AuthParams struct {
+	CommonParams
 	Credentials string `optional:"true" descr:"Path to Google OAuth client credentials JSON from GCP console"`
 	Interactive bool   `short:"i" descr:"Enter client ID and secret interactively" default:"false"`
 }
 
-type StatusParams struct{}
+type StatusParams struct {
+	CommonParams
+}
 
-type LogoutParams struct{}
+type LogoutParams struct {
+	CommonParams
+}
+
+// describeLoc converts a secret.Location string into a human-readable phrase.
+func describeLoc(loc string) string {
+	switch loc {
+	case "":
+		return "(unknown)"
+	case "keychain":
+		return "system keychain"
+	default:
+		return loc
+	}
+}
 
 func getVersion() string {
 	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" {
@@ -62,6 +90,7 @@ func main() {
 		Long:    "Monitors your calendar and displays warnings when meetings are about to start",
 		Version: getVersion(),
 		RunFunc: func(params *Params, cmd *cobra.Command, args []string) {
+			secret.AcceptInsecure(params.AcceptInsecureSecretStorage)
 			run(params)
 		},
 		SubCmds: boa.SubCmds(
@@ -73,7 +102,10 @@ func main() {
 Provide the path to a client credentials JSON file downloaded from the
 Google Cloud Console. The path is saved for subsequent use.
 
-The OAuth token is stored securely in the system keychain.
+By default, the OAuth token and client secret are stored in the system
+keychain. If --accept-insecure-secret-storage is set and the keychain is
+unavailable (e.g. on WSL without gnome-keyring), they fall back to a
+plaintext JSON file under the platform's user config directory.
 
 To get a credentials file:
   1. Go to https://console.cloud.google.com/apis/credentials
@@ -81,6 +113,7 @@ To get a credentials file:
   3. Enable the Google Calendar API
   4. Download the JSON file`,
 				RunFunc: func(params *AuthParams, cmd *cobra.Command, args []string) {
+					secret.AcceptInsecure(params.AcceptInsecureSecretStorage)
 					if params.Interactive {
 						clientID, clientSecret := readClientCredentials()
 						if err := calendar.AuthenticateWithClientIDSecret(clientID, clientSecret); err != nil {
@@ -120,6 +153,7 @@ To get a credentials file:
 				Use:   "status",
 				Short: "Show Google Calendar authentication status",
 				RunFunc: func(params *StatusParams, cmd *cobra.Command, args []string) {
+					secret.AcceptInsecure(params.AcceptInsecureSecretStorage)
 					status := calendar.GetTokenStatus()
 
 					if !status.HasToken && !status.HasCredentials {
@@ -131,13 +165,13 @@ To get a credentials file:
 
 					if status.HasCredentials {
 						fmt.Printf("Client ID: %s\n", status.ClientID)
-						fmt.Println("Client secret: stored in system keychain")
+						fmt.Printf("Client secret: stored in %s\n", describeLoc(status.CredentialsLocation))
 					} else {
 						fmt.Println("Credentials: not configured")
 					}
 
 					if status.HasToken {
-						fmt.Println("Token: stored in system keychain")
+						fmt.Printf("Token: stored in %s\n", describeLoc(status.TokenLocation))
 						if status.HasRefreshToken {
 							fmt.Println("Refresh token: yes (token auto-renews)")
 						} else {
@@ -166,23 +200,25 @@ To get a credentials file:
 			},
 			boa.CmdT[LogoutParams]{
 				Use:   "logout",
-				Short: "Remove stored Google OAuth token from system keychain",
+				Short: "Remove the stored Google OAuth token",
 				RunFunc: func(params *LogoutParams, cmd *cobra.Command, args []string) {
+					secret.AcceptInsecure(params.AcceptInsecureSecretStorage)
 					if !calendar.HasGoogleToken() {
-						fmt.Println("No token found in keychain.")
+						fmt.Println("No stored token.")
 						return
 					}
 					if err := calendar.Logout(); err != nil {
 						fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 						os.Exit(1)
 					}
-					fmt.Println("Token removed from system keychain.")
+					fmt.Println("Token removed.")
 				},
 			},
 			boa.CmdT[ListEventsParams]{
 				Use:   "list-events",
 				Short: "List upcoming calendar events (live integration test)",
 				RunFunc: func(params *ListEventsParams, cmd *cobra.Command, args []string) {
+					secret.AcceptInsecure(params.AcceptInsecureSecretStorage)
 					calendar.ReAuthIfStale()
 					events := calendar.Poll(params.Backend, params.LookaheadDays)
 					if len(events) == 0 {
@@ -210,6 +246,11 @@ To get a credentials file:
 }
 
 func run(params *Params) {
+	if params.DisplayTestAlert {
+		runTestAlert(params)
+		return
+	}
+
 	lockPath := filepath.Join(os.TempDir(), "oh-shit-meeting.lock")
 	fileLock := flock.New(lockPath)
 
@@ -253,15 +294,80 @@ func run(params *Params) {
 	// Clean up ack files older than 7 days
 	ack.Cleanup(7 * 24 * time.Hour)
 
-	gui.Init()
-	go runLoop(params)
+	store := &eventStore{}
+	if err := gui.Init(gui.Config{
+		Port:     params.Port,
+		EventsFn: store.get,
+	}); err != nil {
+		slog.Error("failed to init dashboard", "error", err)
+		os.Exit(1)
+	}
+	go runLoop(params, store)
 	gui.Run()
 }
 
-func runLoop(params *Params) {
-	var events []calendar.Event
-	var eventsMu sync.Mutex
+func runTestAlert(params *Params) {
+	if err := gui.Init(gui.Config{
+		Port:     params.Port,
+		EventsFn: func() []calendar.Event { return nil },
+	}); err != nil {
+		slog.Error("failed to init dashboard", "error", err)
+		os.Exit(1)
+	}
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		start := time.Now().Add(2 * time.Minute)
+		slog.Info("firing test alert", "dashboard", fmt.Sprintf("http://127.0.0.1:%d/", params.Port))
+		gui.ShowPopupBlocking(gui.ReminderInfo{
+			Summary:       "TEST ALERT — oh shit, a meeting!",
+			StartTime:     start,
+			EndTime:       start.Add(30 * time.Minute),
+			TimeUntil:     time.Until(start),
+			ReminderID:    "test-alert",
+			Sound:         params.Sound,
+			Location:      "Your screen",
+			OrganizerName: "oh-shit-meeting self-test",
+			Fullscreen:    params.Fullscreen,
+			Calendar:      "Test calendar",
+			Description: "<p>This is a <b>synthetic</b> alert fired with <code>--display-test-alert</code>.</p>" +
+				"<p>The real alert renders the event description here — sanitized against an allowlist so tags like <a href=\"https://example.com\">safe links</a>, <i>italics</i>, and lists work, but <code>&lt;script&gt;</code> and event handlers are stripped.</p>" +
+				"<ul><li>Attendees below</li><li>Join Meet button above</li><li>Open in Google Calendar link at the bottom</li></ul>" +
+				"<p>Acknowledge to exit.</p>",
+			HangoutLink:   "https://meet.google.com/test-test-test",
+			HtmlLink:      "https://calendar.google.com/",
+			Attendees: []gui.Attendee{
+				{DisplayName: "You", Email: "you@example.com", ResponseStatus: "accepted", Self: true},
+				{DisplayName: "A colleague", Email: "colleague@example.com", ResponseStatus: "accepted"},
+				{DisplayName: "Someone busy", Email: "busy@example.com", ResponseStatus: "tentative"},
+			},
+		})
+		slog.Info("test alert acknowledged — exiting in 2s")
+		// Give the page time to poll /state once more and flip back to the
+		// dashboard view so the user sees confirmation before we exit.
+		time.Sleep(2 * time.Second)
+		os.Exit(0)
+	}()
+	gui.Run()
+}
 
+type eventStore struct {
+	mu     sync.RWMutex
+	events []calendar.Event
+}
+
+func (s *eventStore) get() []calendar.Event {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.events
+}
+
+func (s *eventStore) set(e []calendar.Event) {
+	s.mu.Lock()
+	s.events = e
+	s.mu.Unlock()
+}
+
+func runLoop(params *Params, store *eventStore) {
 	ackStore := &ack.FileStore{}
 	clock := &reminder.RealClock{}
 	finder := reminder.NewFinder(ackStore, clock, reminder.Config{
@@ -274,10 +380,7 @@ func runLoop(params *Params) {
 	go func() {
 		for {
 			calendar.ReAuthIfStale()
-			newEvents := calendar.Poll(params.Backend, params.LookaheadDays)
-			eventsMu.Lock()
-			events = newEvents
-			eventsMu.Unlock()
+			store.set(calendar.Poll(params.Backend, params.LookaheadDays))
 			time.Sleep(params.PollInterval)
 		}
 	}()
@@ -287,9 +390,7 @@ func runLoop(params *Params) {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		eventsMu.Lock()
-		evts := events
-		eventsMu.Unlock()
+		evts := store.get()
 
 		info := finder.FindNext(evts)
 		if info != nil {
@@ -301,9 +402,24 @@ func runLoop(params *Params) {
 				"source", info.ReminderID,
 			)
 
+			var endTime time.Time
+			if info.Event.End.DateTime != "" {
+				endTime, _ = time.Parse(time.RFC3339, info.Event.End.DateTime)
+			}
+			attendees := make([]gui.Attendee, 0, len(info.Event.Attendees))
+			for _, a := range info.Event.Attendees {
+				attendees = append(attendees, gui.Attendee{
+					Email:          a.Email,
+					DisplayName:    a.DisplayName,
+					ResponseStatus: a.ResponseStatus,
+					Self:           a.Self,
+					Organizer:      a.Organizer,
+				})
+			}
 			gui.ShowPopupBlocking(gui.ReminderInfo{
 				Summary:        info.Event.Summary,
 				StartTime:      info.StartTime,
+				EndTime:        endTime,
 				TimeUntil:      info.TimeUntil,
 				ReminderID:     info.ReminderID,
 				Sound:          info.Sound,
@@ -311,6 +427,11 @@ func runLoop(params *Params) {
 				OrganizerName:  info.Event.Organizer.DisplayName,
 				OrganizerEmail: info.Event.Organizer.Email,
 				Fullscreen:     params.Fullscreen,
+				Calendar:       info.Event.Calendar,
+				Description:    info.Event.Description,
+				HangoutLink:    info.Event.HangoutLink,
+				HtmlLink:       info.Event.HtmlLink,
+				Attendees:      attendees,
 			})
 
 			if err := ackStore.MarkAcked(info.AckEventKey, info.ReminderID); err != nil {
