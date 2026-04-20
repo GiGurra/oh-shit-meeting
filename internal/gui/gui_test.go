@@ -25,7 +25,7 @@ func TestSplitEvents_SplitsAroundNow(t *testing.T) {
 		mkEvent("future", "Future", now.Add(10*time.Minute), now.Add(30*time.Minute)),
 	}
 
-	previous, upcoming := splitEvents(events, now, nil)
+	previous, upcoming := splitEvents(events, now, nil, nil)
 	if len(previous) != 1 || previous[0].ID != "past" {
 		t.Errorf("expected previous to contain past event, got %+v", previous)
 	}
@@ -42,7 +42,7 @@ func TestSplitEvents_KeepsEarlierEventsFromSameDay(t *testing.T) {
 		mkEvent("morning", "Morning", time.Date(2026, 4, 20, 9, 0, 0, 0, time.UTC), time.Date(2026, 4, 20, 10, 0, 0, 0, time.UTC)),
 	}
 
-	previous, _ := splitEvents(events, now, nil)
+	previous, _ := splitEvents(events, now, nil, nil)
 	if len(previous) != 1 || previous[0].ID != "morning" {
 		t.Errorf("expected morning event in previous, got %+v", previous)
 	}
@@ -56,7 +56,7 @@ func TestSplitEvents_DropsEventsBeforeStartOfToday(t *testing.T) {
 		mkEvent("today", "Today", time.Date(2026, 4, 20, 9, 0, 0, 0, time.UTC), time.Date(2026, 4, 20, 10, 0, 0, 0, time.UTC)),
 	}
 
-	previous, _ := splitEvents(events, now, nil)
+	previous, _ := splitEvents(events, now, nil, nil)
 	if len(previous) != 1 || previous[0].ID != "today" {
 		t.Errorf("expected only today's event, got %+v", previous)
 	}
@@ -70,7 +70,7 @@ func TestSplitEvents_JustAfterMidnightUsesRollingHour(t *testing.T) {
 		mkEvent("late-yesterday", "Late", time.Date(2026, 4, 19, 23, 45, 0, 0, time.UTC), time.Date(2026, 4, 20, 0, 15, 0, 0, time.UTC)),
 	}
 
-	previous, _ := splitEvents(events, now, nil)
+	previous, _ := splitEvents(events, now, nil, nil)
 	if len(previous) != 1 || previous[0].ID != "late-yesterday" {
 		t.Errorf("expected late-yesterday event to show right after midnight, got %+v", previous)
 	}
@@ -82,7 +82,7 @@ func TestSplitEvents_PopulatesAckedFlag(t *testing.T) {
 	notAcked := mkEvent("no-ack", "Clear", now.Add(10*time.Minute), now.Add(40*time.Minute))
 
 	isAcked := func(id string, _ time.Time) bool { return id == "ack" }
-	_, upcoming := splitEvents([]calendar.Event{acked, notAcked}, now, isAcked)
+	_, upcoming := splitEvents([]calendar.Event{acked, notAcked}, now, isAcked, nil)
 
 	if len(upcoming) != 2 {
 		t.Fatalf("expected 2 upcoming events, got %d", len(upcoming))
@@ -111,7 +111,7 @@ func TestSplitEvents_PassesStartTimeToAckLookup(t *testing.T) {
 		seenStart = st
 		return false
 	}
-	_, _ = splitEvents([]calendar.Event{e}, now, lookup)
+	_, _ = splitEvents([]calendar.Event{e}, now, lookup, nil)
 
 	if !seenStart.Equal(start) {
 		t.Errorf("expected lookup to receive start=%v, got %v", start, seenStart)
@@ -125,7 +125,7 @@ func TestSplitEvents_SkipsEventsWithNoStartTime(t *testing.T) {
 		mkEvent("ok", "OK", now.Add(5*time.Minute), now.Add(30*time.Minute)),
 	}
 
-	previous, upcoming := splitEvents(events, now, nil)
+	previous, upcoming := splitEvents(events, now, nil, nil)
 	if len(previous) != 0 {
 		t.Errorf("expected no previous, got %+v", previous)
 	}
@@ -137,7 +137,7 @@ func TestSplitEvents_SkipsEventsWithNoStartTime(t *testing.T) {
 func TestSplitEvents_NilIsAckedIsSafe(t *testing.T) {
 	now := time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
 	e := mkEvent("evt", "OK", now.Add(5*time.Minute), now.Add(30*time.Minute))
-	_, upcoming := splitEvents([]calendar.Event{e}, now, nil)
+	_, upcoming := splitEvents([]calendar.Event{e}, now, nil, nil)
 	if len(upcoming) != 1 || upcoming[0].Acked {
 		t.Errorf("expected single non-acked event, got %+v", upcoming)
 	}
@@ -229,5 +229,99 @@ func TestHandleEventAck_RejectsBadStartTime(t *testing.T) {
 	handleEventAck(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for invalid startTime, got %d", w.Code)
+	}
+}
+
+func TestHandleReminderAck_PassesAllArgs(t *testing.T) {
+	var gotID, gotRemID string
+	var gotStart time.Time
+	withStubConfig(t, Config{
+		AckReminderFn: func(id string, st time.Time, rid string) error {
+			gotID, gotStart, gotRemID = id, st, rid
+			return nil
+		},
+	})
+
+	start := time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
+	req := httptest.NewRequest(http.MethodPost,
+		"/ack-reminder?eventId=evt1&startTime="+start.Format(time.RFC3339)+"&reminderId=10m", nil)
+	w := httptest.NewRecorder()
+	handleReminderAck(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d (%s)", w.Code, w.Body.String())
+	}
+	if gotID != "evt1" || gotRemID != "10m" || !gotStart.Equal(start) {
+		t.Errorf("unexpected args: id=%q rid=%q start=%v", gotID, gotRemID, gotStart)
+	}
+}
+
+func TestHandleReminderUnack_CallsUnackFunc(t *testing.T) {
+	called := false
+	withStubConfig(t, Config{
+		UnackReminderFn: func(id string, st time.Time, rid string) error {
+			called = true
+			return nil
+		},
+	})
+
+	start := time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
+	req := httptest.NewRequest(http.MethodPost,
+		"/unack-reminder?eventId=evt1&startTime="+start.Format(time.RFC3339)+"&reminderId=global", nil)
+	w := httptest.NewRecorder()
+	handleReminderUnack(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", w.Code)
+	}
+	if !called {
+		t.Error("expected UnackReminderFn to be called")
+	}
+}
+
+func TestHandleReminderAck_RejectsMissingReminderId(t *testing.T) {
+	withStubConfig(t, Config{AckReminderFn: func(string, time.Time, string) error { return nil }})
+	req := httptest.NewRequest(http.MethodPost,
+		"/ack-reminder?eventId=evt1&startTime=2026-04-20T12:00:00Z", nil)
+	w := httptest.NewRecorder()
+	handleReminderAck(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for missing reminderId, got %d", w.Code)
+	}
+}
+
+func TestHandleReminderAck_RejectsNonPost(t *testing.T) {
+	withStubConfig(t, Config{AckReminderFn: func(string, time.Time, string) error { return nil }})
+	req := httptest.NewRequest(http.MethodGet,
+		"/ack-reminder?eventId=evt1&startTime=2026-04-20T12:00:00Z&reminderId=global", nil)
+	w := httptest.NewRecorder()
+	handleReminderAck(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", w.Code)
+	}
+}
+
+func TestSplitEvents_PopulatesReminders(t *testing.T) {
+	now := time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
+	e := mkEvent("evt1", "Has Reminders", now.Add(5*time.Minute), now.Add(30*time.Minute))
+
+	remindersFn := func(_ calendar.Event, _ time.Time) []Reminder {
+		return []Reminder{
+			{ID: "10m", Label: "10 min before", Acked: true},
+			{ID: "global", Label: "5 min before (default)", Acked: false},
+		}
+	}
+	_, upcoming := splitEvents([]calendar.Event{e}, now, nil, remindersFn)
+	if len(upcoming) != 1 {
+		t.Fatalf("expected 1 upcoming, got %d", len(upcoming))
+	}
+	if len(upcoming[0].Reminders) != 2 {
+		t.Fatalf("expected 2 reminders, got %d", len(upcoming[0].Reminders))
+	}
+	if upcoming[0].Reminders[0].ID != "10m" || !upcoming[0].Reminders[0].Acked {
+		t.Errorf("expected first reminder id=10m acked=true, got %+v", upcoming[0].Reminders[0])
+	}
+	if upcoming[0].Reminders[1].ID != "global" || upcoming[0].Reminders[1].Acked {
+		t.Errorf("expected second reminder id=global acked=false, got %+v", upcoming[0].Reminders[1])
 	}
 }

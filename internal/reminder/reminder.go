@@ -69,6 +69,80 @@ func AckEventKey(eventID string, startTime time.Time) string {
 	return eventID + "_" + startTime.UTC().Format("20060102T150405Z")
 }
 
+// ReminderState describes one configurable alert for an event occurrence
+// along with its current ack state. Used by the dashboard.
+type ReminderState struct {
+	ID    string // ack file ID: "10m", "global", "started"
+	Label string // human-readable, e.g. "10 min before"
+	Acked bool
+}
+
+// Reminders enumerates every alert that can fire for this event occurrence:
+// each popup override, plus global (when WarnBefore>0), plus started.
+// Each is annotated with current ack state.
+func (f *Finder) Reminders(event calendar.Event, startTime time.Time) []ReminderState {
+	ackKey := AckEventKey(event.ID, startTime)
+	out := make([]ReminderState, 0, len(event.Reminders.Overrides)+2)
+
+	for _, r := range event.Reminders.Overrides {
+		if r.Method != "popup" {
+			continue
+		}
+		id := fmt.Sprintf("%dm", r.Minutes)
+		out = append(out, ReminderState{
+			ID:    id,
+			Label: fmt.Sprintf("%d min before", r.Minutes),
+			Acked: f.ackStore.IsAcked(ackKey, id),
+		})
+	}
+
+	if f.config.WarnBefore > 0 {
+		mins := int(f.config.WarnBefore.Minutes())
+		out = append(out, ReminderState{
+			ID:    "global",
+			Label: fmt.Sprintf("%d min before (default)", mins),
+			Acked: f.ackStore.IsAcked(ackKey, "global"),
+		})
+	}
+
+	out = append(out, ReminderState{
+		ID:    "started",
+		Label: "when meeting starts",
+		Acked: f.ackStore.IsAcked(ackKey, "started"),
+	})
+
+	return out
+}
+
+// IsFullyAcked returns true when every alert that can fire for this event
+// occurrence has been acked: each custom popup override, plus the terminal
+// alert (global if WarnBefore>0, else started as the only post-start alert).
+// "started" counts as a fallback for global, since started only fires when
+// global was missed entirely.
+func (f *Finder) IsFullyAcked(event calendar.Event, startTime time.Time) bool {
+	ackKey := AckEventKey(event.ID, startTime)
+
+	for _, r := range event.Reminders.Overrides {
+		if r.Method != "popup" {
+			continue
+		}
+		if !f.ackStore.IsAcked(ackKey, fmt.Sprintf("%dm", r.Minutes)) {
+			return false
+		}
+	}
+
+	if f.config.WarnBefore > 0 {
+		if !f.ackStore.IsAcked(ackKey, "global") && !f.ackStore.IsAcked(ackKey, "started") {
+			return false
+		}
+	} else {
+		if !f.ackStore.IsAcked(ackKey, "started") {
+			return false
+		}
+	}
+	return true
+}
+
 // hasGlobalAck checks if the global or started reminder was acknowledged.
 // Used to suppress "started" alerts when user already saw the main reminder.
 // Custom reminders (10m, 30m, etc.) are early warnings and don't count.

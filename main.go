@@ -296,6 +296,10 @@ func run(params *Params) {
 
 	store := &eventStore{}
 	ackStore := &ack.FileStore{}
+	finder := reminder.NewFinder(ackStore, &reminder.RealClock{}, reminder.Config{
+		WarnBefore: params.WarnBefore,
+		Sound:      params.Sound,
+	})
 	if err := gui.Init(gui.Config{
 		Port:     params.Port,
 		EventsFn: store.get,
@@ -308,12 +312,61 @@ func run(params *Params) {
 		UnackEventFn: func(eventID string, startTime time.Time) error {
 			return ackStore.Unack(reminder.AckEventKey(eventID, startTime), reminder.EventAckID)
 		},
+		RemindersFn: func(event calendar.Event, startTime time.Time) []gui.Reminder {
+			rs := finder.Reminders(event, startTime)
+			out := make([]gui.Reminder, 0, len(rs))
+			for _, r := range rs {
+				out = append(out, gui.Reminder{ID: r.ID, Label: r.Label, Acked: r.Acked})
+			}
+			return out
+		},
+		AckReminderFn: func(eventID string, startTime time.Time, reminderID string) error {
+			ackKey := reminder.AckEventKey(eventID, startTime)
+			if err := ackStore.MarkAcked(ackKey, reminderID); err != nil {
+				return err
+			}
+			// Mirror runLoop: promote to event-level when fully covered.
+			if event, ok := findEvent(store.get(), eventID, startTime); ok {
+				if finder.IsFullyAcked(event, startTime) {
+					if err := ackStore.MarkAcked(ackKey, reminder.EventAckID); err != nil {
+						slog.Error("Failed to promote to event ack", "error", err)
+					}
+				}
+			}
+			return nil
+		},
+		UnackReminderFn: func(eventID string, startTime time.Time, reminderID string) error {
+			ackKey := reminder.AckEventKey(eventID, startTime)
+			if err := ackStore.Unack(ackKey, reminderID); err != nil {
+				return err
+			}
+			// Removing a per-reminder ack means the event is no longer fully
+			// covered, so drop the auto-promoted event ack too.
+			return ackStore.Unack(ackKey, reminder.EventAckID)
+		},
 	}); err != nil {
 		slog.Error("failed to init dashboard", "error", err)
 		os.Exit(1)
 	}
-	go runLoop(params, store, ackStore)
+	go runLoop(params, store, ackStore, finder)
 	gui.Run()
+}
+
+// findEvent returns the event with the given ID and start time from a slice.
+func findEvent(events []calendar.Event, eventID string, startTime time.Time) (calendar.Event, bool) {
+	for _, e := range events {
+		if e.ID != eventID {
+			continue
+		}
+		st, err := time.Parse(time.RFC3339, e.Start.DateTime)
+		if err != nil {
+			continue
+		}
+		if st.Equal(startTime) {
+			return e, true
+		}
+	}
+	return calendar.Event{}, false
 }
 
 func runTestAlert(params *Params) {
@@ -377,13 +430,7 @@ func (s *eventStore) set(e []calendar.Event) {
 	s.mu.Unlock()
 }
 
-func runLoop(params *Params, store *eventStore, ackStore *ack.FileStore) {
-	clock := &reminder.RealClock{}
-	finder := reminder.NewFinder(ackStore, clock, reminder.Config{
-		WarnBefore: params.WarnBefore,
-		Sound:      params.Sound,
-	})
-
+func runLoop(params *Params, store *eventStore, ackStore *ack.FileStore, finder *reminder.Finder) {
 	// Poll calendar in a separate goroutine so slow/hung API calls
 	// never block the alert check loop.
 	go func() {
@@ -445,6 +492,14 @@ func runLoop(params *Params, store *eventStore, ackStore *ack.FileStore) {
 
 			if err := ackStore.MarkAcked(info.AckEventKey, info.ReminderID); err != nil {
 				slog.Error("Failed to mark reminder as acknowledged", "error", err)
+			}
+			// If every alert that could fire for this event is now acked,
+			// promote to an event-level ack so the dashboard reflects the
+			// fully-handled state.
+			if finder.IsFullyAcked(info.Event, info.StartTime) {
+				if err := ackStore.MarkAcked(info.AckEventKey, reminder.EventAckID); err != nil {
+					slog.Error("Failed to promote to event ack", "error", err)
+				}
 			}
 		}
 	}

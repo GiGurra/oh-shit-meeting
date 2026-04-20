@@ -23,11 +23,23 @@ import (
 )
 
 type Config struct {
-	Port           int
-	EventsFn       func() []calendar.Event
-	IsEventAckedFn func(eventID string, startTime time.Time) bool
-	AckEventFn     func(eventID string, startTime time.Time) error
-	UnackEventFn   func(eventID string, startTime time.Time) error
+	Port             int
+	EventsFn         func() []calendar.Event
+	IsEventAckedFn   func(eventID string, startTime time.Time) bool
+	AckEventFn       func(eventID string, startTime time.Time) error
+	UnackEventFn     func(eventID string, startTime time.Time) error
+	RemindersFn      func(event calendar.Event, startTime time.Time) []Reminder
+	AckReminderFn    func(eventID string, startTime time.Time, reminderID string) error
+	UnackReminderFn  func(eventID string, startTime time.Time, reminderID string) error
+}
+
+// Reminder mirrors reminder.ReminderState for the gui layer (kept here so
+// callers can wire up Config without importing the reminder package types
+// into HTTP handlers).
+type Reminder struct {
+	ID    string
+	Label string
+	Acked bool
 }
 
 type ReminderInfo struct {
@@ -78,6 +90,8 @@ func Init(c Config) error {
 	mux.HandleFunc("/ack", guardLocal(handleAck))
 	mux.HandleFunc("/ack-event", guardLocal(handleEventAck))
 	mux.HandleFunc("/unack-event", guardLocal(handleEventUnack))
+	mux.HandleFunc("/ack-reminder", guardLocal(handleReminderAck))
+	mux.HandleFunc("/unack-reminder", guardLocal(handleReminderUnack))
 
 	addr := fmt.Sprintf("127.0.0.1:%d", cfg.Port)
 	ln, err := net.Listen("tcp", addr)
@@ -208,6 +222,13 @@ type eventDTO struct {
 	Attendees   []attendeeDTO `json:"attendees,omitempty"`
 	Status      string        `json:"status,omitempty"`
 	Acked       bool          `json:"acked,omitempty"`
+	Reminders   []reminderDTO `json:"reminders,omitempty"`
+}
+
+type reminderDTO struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+	Acked bool   `json:"acked"`
 }
 
 type attendeeDTO struct {
@@ -350,6 +371,43 @@ func handleEventUnack(w http.ResponseWriter, r *http.Request) {
 	handleEventAckChange(w, r, cfg.UnackEventFn, "unack")
 }
 
+func handleReminderAck(w http.ResponseWriter, r *http.Request) {
+	handleReminderAckChange(w, r, cfg.AckReminderFn, "ack")
+}
+
+func handleReminderUnack(w http.ResponseWriter, r *http.Request) {
+	handleReminderAckChange(w, r, cfg.UnackReminderFn, "unack")
+}
+
+func handleReminderAckChange(w http.ResponseWriter, r *http.Request, fn func(string, time.Time, string) error, label string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if fn == nil {
+		http.Error(w, label+" not configured", http.StatusInternalServerError)
+		return
+	}
+	eventID := r.URL.Query().Get("eventId")
+	startStr := r.URL.Query().Get("startTime")
+	reminderID := r.URL.Query().Get("reminderId")
+	if eventID == "" || startStr == "" || reminderID == "" {
+		http.Error(w, "missing eventId, startTime, or reminderId", http.StatusBadRequest)
+		return
+	}
+	st, err := time.Parse(time.RFC3339, startStr)
+	if err != nil {
+		http.Error(w, "invalid startTime", http.StatusBadRequest)
+		return
+	}
+	if err := fn(eventID, st, reminderID); err != nil {
+		slog.Error("reminder "+label+" failed", "error", err, "eventId", eventID, "reminderId", reminderID)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func handleEventAckChange(w http.ResponseWriter, r *http.Request, fn func(string, time.Time) error, label string) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
@@ -384,15 +442,15 @@ func visibleEvents() (previous, upcoming []eventDTO) {
 	if cfg.EventsFn == nil {
 		return nil, nil
 	}
-	return splitEvents(cfg.EventsFn(), time.Now(), cfg.IsEventAckedFn)
+	return splitEvents(cfg.EventsFn(), time.Now(), cfg.IsEventAckedFn, cfg.RemindersFn)
 }
 
 // splitEvents is the pure, testable core of visibleEvents. It keeps events
 // whose start falls in the window [lookback, ∞) and splits them around now.
 // Lookback is the earlier of (now - 1h) and start-of-today, so mid-afternoon
 // reloads still show the morning's events.
-// isAcked may be nil, in which case Acked is always false.
-func splitEvents(events []calendar.Event, now time.Time, isAcked func(string, time.Time) bool) (previous, upcoming []eventDTO) {
+// isAcked and remindersFn may be nil.
+func splitEvents(events []calendar.Event, now time.Time, isAcked func(string, time.Time) bool, remindersFn func(calendar.Event, time.Time) []Reminder) (previous, upcoming []eventDTO) {
 	lookback := calendar.LookbackStart(now, 1*time.Hour)
 	previous = make([]eventDTO, 0)
 	upcoming = make([]eventDTO, 0)
@@ -410,6 +468,14 @@ func splitEvents(events []calendar.Event, now time.Time, isAcked func(string, ti
 		dto := toEventDTO(e, st)
 		if isAcked != nil {
 			dto.Acked = isAcked(e.ID, st)
+		}
+		if remindersFn != nil {
+			rs := remindersFn(e, st)
+			rems := make([]reminderDTO, 0, len(rs))
+			for _, r := range rs {
+				rems = append(rems, reminderDTO{ID: r.ID, Label: r.Label, Acked: r.Acked})
+			}
+			dto.Reminders = rems
 		}
 		if st.Before(now) {
 			previous = append(previous, dto)
@@ -582,6 +648,16 @@ const indexHTML = `<!doctype html>
   .ack-btn:hover { background: #ccc3; }
   .ack-btn.primary { background: #1a7f1a; color: white; border-color: #1a7f1a; }
   .ack-btn.primary:hover { background: #156515; }
+  .reminders { list-style: none; padding: 0; margin: 0.25rem 0 0; }
+  .reminders li {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0.3rem 0; gap: 0.5rem;
+    border-top: 1px dashed #ccc4;
+  }
+  .reminders li:first-child { border-top: none; }
+  .reminders .label { font-size: 0.9rem; }
+  .reminders .label.acked { text-decoration: line-through; opacity: 0.6; }
+  .reminders .ack-btn { font-size: 0.8rem; padding: 0.2rem 0.6rem; }
   .previous-group { margin-bottom: 1rem; }
   .previous-group > summary {
     cursor: pointer; padding: 0.5rem 0; font-weight: 600; list-style: none;
@@ -739,8 +815,27 @@ function renderEventBody(e) {
   if (e.htmlLink) {
     html += '<section><a class="cal-link" href="' + escapeAttr(e.htmlLink) + '" target="_blank" rel="noopener">Open in Google Calendar ↗</a></section>';
   }
+  html += renderRemindersSection(e);
   html += renderAckActions(e);
   html += '</div>';
+  return html;
+}
+
+function renderRemindersSection(e) {
+  if (!e.reminders || !e.reminders.length || !e.id) return "";
+  const payload = 'data-event-id="' + escapeAttr(e.id) + '" data-start="' + escapeAttr(e.startTime) + '"';
+  let html = '<section><h3>Reminders</h3><ul class="reminders">';
+  for (const r of e.reminders) {
+    const labelCls = r.acked ? 'label acked' : 'label';
+    html += '<li><span class="' + labelCls + '">' + escapeHtml(r.label);
+    if (r.acked) html += ' <span class="ack-badge">✓</span>';
+    html += '</span>';
+    const btnCls = r.acked ? 'ack-btn unack-reminder-btn' : 'ack-btn ack-reminder-btn';
+    const btnText = r.acked ? 'Unack' : 'Ack';
+    html += '<button class="' + btnCls + '" ' + payload + ' data-reminder-id="' + escapeAttr(r.id) + '">' + btnText + '</button>';
+    html += '</li>';
+  }
+  html += '</ul></section>';
   return html;
 }
 
@@ -754,7 +849,8 @@ function renderAckActions(e) {
 }
 
 function eventKey(e) {
-  return (e.id || "") + "|" + (e.summary || "") + "|" + (e.startTime || "") + "|" + (e.hangoutLink || "") + "|" + ((e.attendees || []).length) + "|" + (e.description || "").length + "|" + (e.location || "") + "|" + (e.acked ? "1" : "0");
+  const remKey = (e.reminders || []).map(r => r.id + (r.acked ? "1" : "0")).join(",");
+  return (e.id || "") + "|" + (e.summary || "") + "|" + (e.startTime || "") + "|" + (e.hangoutLink || "") + "|" + ((e.attendees || []).length) + "|" + (e.description || "").length + "|" + (e.location || "") + "|" + (e.acked ? "1" : "0") + "|" + remKey;
 }
 
 function renderEventListItem(e, now) {
@@ -852,6 +948,32 @@ function bindAckButtons() {
       ackEvent(btn.dataset.eventId, btn.dataset.start, "/unack-event", false);
     });
   });
+  root.querySelectorAll(".ack-reminder-btn").forEach(btn => {
+    btn.addEventListener("click", ev => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      ackReminder(btn.dataset.eventId, btn.dataset.start, btn.dataset.reminderId, "/ack-reminder");
+    });
+  });
+  root.querySelectorAll(".unack-reminder-btn").forEach(btn => {
+    btn.addEventListener("click", ev => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      ackReminder(btn.dataset.eventId, btn.dataset.start, btn.dataset.reminderId, "/unack-reminder");
+    });
+  });
+}
+
+async function ackReminder(eventId, startTime, reminderId, endpoint) {
+  if (!eventId || !startTime || !reminderId) return;
+  try {
+    await fetch(endpoint
+      + "?eventId=" + encodeURIComponent(eventId)
+      + "&startTime=" + encodeURIComponent(startTime)
+      + "&reminderId=" + encodeURIComponent(reminderId), { method: "POST" });
+  } catch (e) { /* ignore */ }
+  lastRendered = "";
+  tick();
 }
 
 async function ackEvent(eventId, startTime, endpoint, collapseAfter) {

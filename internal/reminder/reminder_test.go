@@ -729,6 +729,289 @@ func TestFindNext_EventAckSuppressesCustomReminders(t *testing.T) {
 	}
 }
 
+func TestIsFullyAcked_GlobalOnly(t *testing.T) {
+	clock := &mockClock{now: time.Date(2026, 2, 4, 9, 0, 0, 0, time.UTC)}
+	ackStore := newMockAckStore()
+	finder := NewFinder(ackStore, clock, Config{WarnBefore: 5 * time.Minute})
+
+	start := clock.now.Add(3 * time.Minute)
+	event := makeEvent("evt1", "Global Only", start, clock.now.Add(1*time.Hour))
+
+	if finder.IsFullyAcked(event, start) {
+		t.Fatal("expected not fully acked before any ack")
+	}
+
+	ackStore.setAcked(AckEventKey("evt1", start), "global")
+	if !finder.IsFullyAcked(event, start) {
+		t.Fatal("expected fully acked once global is acked")
+	}
+}
+
+func TestIsFullyAcked_StartedActsAsGlobalFallback(t *testing.T) {
+	clock := &mockClock{now: time.Date(2026, 2, 4, 9, 0, 0, 0, time.UTC)}
+	ackStore := newMockAckStore()
+	finder := NewFinder(ackStore, clock, Config{WarnBefore: 5 * time.Minute})
+
+	start := clock.now.Add(-3 * time.Minute)
+	event := makeEvent("evt1", "Started Fallback", start, clock.now.Add(30*time.Minute))
+
+	ackStore.setAcked(AckEventKey("evt1", start), "started")
+	if !finder.IsFullyAcked(event, start) {
+		t.Fatal("expected started ack to satisfy terminal-alert requirement")
+	}
+}
+
+func TestIsFullyAcked_CustomPlusGlobal(t *testing.T) {
+	clock := &mockClock{now: time.Date(2026, 2, 4, 9, 0, 0, 0, time.UTC)}
+	ackStore := newMockAckStore()
+	finder := NewFinder(ackStore, clock, Config{WarnBefore: 5 * time.Minute})
+
+	start := clock.now.Add(3 * time.Minute)
+	event := makeEventWithReminders("evt1", "Custom + Global", start, clock.now.Add(1*time.Hour), 10, 30)
+	ackKey := AckEventKey("evt1", start)
+
+	ackStore.setAcked(ackKey, "30m")
+	if finder.IsFullyAcked(event, start) {
+		t.Fatal("expected not acked after only 30m ack")
+	}
+
+	ackStore.setAcked(ackKey, "10m")
+	if finder.IsFullyAcked(event, start) {
+		t.Fatal("expected not acked while global is still pending")
+	}
+
+	ackStore.setAcked(ackKey, "global")
+	if !finder.IsFullyAcked(event, start) {
+		t.Fatal("expected fully acked once all customs and global are acked")
+	}
+}
+
+func TestIsFullyAcked_CustomOnlyZeroWarnBefore(t *testing.T) {
+	clock := &mockClock{now: time.Date(2026, 2, 4, 9, 0, 0, 0, time.UTC)}
+	ackStore := newMockAckStore()
+	finder := NewFinder(ackStore, clock, Config{WarnBefore: 0})
+
+	start := clock.now.Add(3 * time.Minute)
+	event := makeEventWithReminders("evt1", "Custom Only", start, clock.now.Add(1*time.Hour), 10)
+	ackKey := AckEventKey("evt1", start)
+
+	ackStore.setAcked(ackKey, "10m")
+	if finder.IsFullyAcked(event, start) {
+		t.Fatal("expected not acked: started must still be acked when WarnBefore=0")
+	}
+
+	ackStore.setAcked(ackKey, "started")
+	if !finder.IsFullyAcked(event, start) {
+		t.Fatal("expected fully acked once custom and started are acked")
+	}
+}
+
+// === Per-reminder semantics: acking one shouldn't suppress others ===
+
+func TestFindNext_AckingOneCustom_OthersStillFire(t *testing.T) {
+	// User acks the 30m custom. Both 10m custom and global should still fire later.
+	now := time.Date(2026, 2, 4, 9, 0, 0, 0, time.UTC)
+	clock := &mockClock{now: now}
+	ackStore := newMockAckStore()
+	finder := NewFinder(ackStore, clock, Config{WarnBefore: 5 * time.Minute})
+
+	start := now.Add(8 * time.Minute) // 10m custom is in window, global not yet
+	end := now.Add(1 * time.Hour)
+	event := makeEventWithReminders("evt1", "Many Reminders", start, end, 10, 30)
+	ackStore.setAcked(AckEventKey("evt1", start), "30m")
+
+	// At T-8m, 10m custom should fire (30m already acked, 10m unacked).
+	result := finder.FindNext([]calendar.Event{event})
+	if result == nil || result.ReminderID != "10m" {
+		t.Fatalf("expected 10m to still fire, got %+v", result)
+	}
+
+	// Now also ack 10m. Advance to T-3m (within global window).
+	ackStore.setAcked(AckEventKey("evt1", start), "10m")
+	clock.now = start.Add(-3 * time.Minute)
+	result = finder.FindNext([]calendar.Event{event})
+	if result == nil || result.ReminderID != "global" {
+		t.Fatalf("expected global to still fire after both customs acked, got %+v", result)
+	}
+}
+
+func TestFindNext_AckingGlobal_DoesNotSuppressLaterCustom(t *testing.T) {
+	// Documents current behavior: a custom reminder scheduled AFTER global
+	// (e.g. 1m before, with WarnBefore=5m) still fires even if user acked global.
+	// If you want global to imply "stop everything", use the dashboard's
+	// "Acknowledge event" instead (writes EventAckID).
+	now := time.Date(2026, 2, 4, 9, 0, 0, 0, time.UTC)
+	clock := &mockClock{now: now}
+	ackStore := newMockAckStore()
+	finder := NewFinder(ackStore, clock, Config{WarnBefore: 5 * time.Minute})
+
+	start := now.Add(1 * time.Minute) // both global and 1m custom are due
+	end := now.Add(1 * time.Hour)
+	event := makeEventWithReminders("evt1", "Late Custom", start, end, 1)
+
+	// User acked global (which would otherwise fire too).
+	ackStore.setAcked(AckEventKey("evt1", start), "global")
+
+	// 1m custom (the only unacked alert in window) should still fire.
+	result := finder.FindNext([]calendar.Event{event})
+	if result == nil || result.ReminderID != "1m" {
+		t.Fatalf("expected 1m custom to still fire after global ack, got %+v", result)
+	}
+}
+
+// === Global ack semantics ===
+
+func TestFindNext_AckingGlobal_StopsGlobalAndStarted(t *testing.T) {
+	// With no custom reminders, acking global should stop global and started.
+	now := time.Date(2026, 2, 4, 9, 0, 0, 0, time.UTC)
+	clock := &mockClock{now: now}
+	ackStore := newMockAckStore()
+	finder := NewFinder(ackStore, clock, Config{WarnBefore: 5 * time.Minute})
+
+	start := now.Add(3 * time.Minute)
+	end := now.Add(1 * time.Hour)
+	event := makeEvent("evt1", "Default Setup", start, end)
+	ackStore.setAcked(AckEventKey("evt1", start), "global")
+
+	// Within global window — global suppressed.
+	if r := finder.FindNext([]calendar.Event{event}); r != nil {
+		t.Errorf("expected nil at T-3m after global ack, got %+v", r)
+	}
+
+	// Advance past start — started must also be suppressed.
+	clock.now = start.Add(2 * time.Minute)
+	if r := finder.FindNext([]calendar.Event{event}); r != nil {
+		t.Errorf("expected nil after start when global was acked, got %+v", r)
+	}
+}
+
+// === Recurring / per-instance independence ===
+
+func TestFindNext_GlobalAckOnOneInstance_DoesNotAffectAnother(t *testing.T) {
+	// Same event ID, two different start times (typical recurring/rescheduled).
+	// Acking global on instance A must not silence instance B.
+	now := time.Date(2026, 4, 15, 13, 12, 0, 0, time.UTC)
+	clock := &mockClock{now: now}
+	ackStore := newMockAckStore()
+	finder := NewFinder(ackStore, clock, Config{WarnBefore: 5 * time.Minute})
+
+	startA := time.Date(2026, 4, 13, 13, 15, 0, 0, time.UTC) // last week
+	startB := time.Date(2026, 4, 15, 13, 15, 0, 0, time.UTC) // today, in window
+
+	// Ack global on instance A.
+	ackStore.setAcked(AckEventKey("recurring", startA), "global")
+
+	// Instance B should still be alerted.
+	eventB := makeEvent("recurring", "Weekly Sync", startB, startB.Add(45*time.Minute))
+	result := finder.FindNext([]calendar.Event{eventB})
+	if result == nil || result.ReminderID != "global" {
+		t.Fatalf("expected global to fire for fresh instance B, got %+v", result)
+	}
+}
+
+func TestFindNext_EventAckOnOneInstance_DoesNotAffectAnother(t *testing.T) {
+	// Same isolation guarantee for the dashboard's "Acknowledge event" master ack.
+	now := time.Date(2026, 4, 15, 13, 12, 0, 0, time.UTC)
+	clock := &mockClock{now: now}
+	ackStore := newMockAckStore()
+	finder := NewFinder(ackStore, clock, Config{WarnBefore: 5 * time.Minute})
+
+	startA := time.Date(2026, 4, 13, 13, 15, 0, 0, time.UTC)
+	startB := time.Date(2026, 4, 15, 13, 15, 0, 0, time.UTC)
+	ackStore.setAcked(AckEventKey("recurring", startA), EventAckID)
+
+	eventB := makeEvent("recurring", "Weekly Sync", startB, startB.Add(45*time.Minute))
+	result := finder.FindNext([]calendar.Event{eventB})
+	if result == nil {
+		t.Fatal("expected fresh instance B to still alert despite event-ack on A")
+	}
+}
+
+// === Auto-promotion: emulating runLoop's MarkAcked → IsFullyAcked → MarkAcked(EventAckID) ===
+
+// promoteIfFullyAcked replicates the auto-promotion side-effect performed by
+// runLoop / the per-reminder HTTP handler so we can drive it from tests.
+func promoteIfFullyAcked(t *testing.T, f *Finder, store *mockAckStore, event calendar.Event, start time.Time) {
+	t.Helper()
+	if f.IsFullyAcked(event, start) {
+		store.setAcked(AckEventKey(event.ID, start), EventAckID)
+	}
+}
+
+func TestAutoPromote_LastAckSetsEventLevel(t *testing.T) {
+	now := time.Date(2026, 2, 4, 9, 0, 0, 0, time.UTC)
+	clock := &mockClock{now: now}
+	store := newMockAckStore()
+	finder := NewFinder(store, clock, Config{WarnBefore: 5 * time.Minute})
+
+	start := now.Add(20 * time.Minute)
+	event := makeEventWithReminders("evt1", "Auto Promote", start, now.Add(1*time.Hour), 10, 30)
+	ackKey := AckEventKey("evt1", start)
+
+	// Ack each per-reminder in turn — only the last should trigger promotion.
+	store.setAcked(ackKey, "30m")
+	promoteIfFullyAcked(t, finder, store, event, start)
+	if store.IsAcked(ackKey, EventAckID) {
+		t.Fatal("event ack must not be promoted while customs remain unacked")
+	}
+
+	store.setAcked(ackKey, "10m")
+	promoteIfFullyAcked(t, finder, store, event, start)
+	if store.IsAcked(ackKey, EventAckID) {
+		t.Fatal("event ack must not be promoted while global is unacked")
+	}
+
+	store.setAcked(ackKey, "global")
+	promoteIfFullyAcked(t, finder, store, event, start)
+	if !store.IsAcked(ackKey, EventAckID) {
+		t.Fatal("event ack should be promoted once everything is acked")
+	}
+}
+
+func TestAutoPromote_OnlyAffectsTargetedInstance(t *testing.T) {
+	// Auto-promotion uses AckEventKey(eventID, startTime) — the start time is
+	// part of the key, so promoting instance A's event ack must not touch B.
+	now := time.Date(2026, 4, 15, 13, 0, 0, 0, time.UTC)
+	clock := &mockClock{now: now}
+	store := newMockAckStore()
+	finder := NewFinder(store, clock, Config{WarnBefore: 5 * time.Minute})
+
+	startA := time.Date(2026, 4, 15, 13, 15, 0, 0, time.UTC)
+	startB := time.Date(2026, 4, 22, 13, 15, 0, 0, time.UTC) // next week
+	eventA := makeEvent("recurring", "Weekly", startA, startA.Add(30*time.Minute))
+
+	// Fully ack instance A.
+	store.setAcked(AckEventKey("recurring", startA), "global")
+	promoteIfFullyAcked(t, finder, store, eventA, startA)
+
+	if !store.IsAcked(AckEventKey("recurring", startA), EventAckID) {
+		t.Fatal("instance A should be event-acked")
+	}
+	if store.IsAcked(AckEventKey("recurring", startB), EventAckID) {
+		t.Fatal("instance B must not inherit event ack from A")
+	}
+	if store.IsAcked(AckEventKey("recurring", startB), "global") {
+		t.Fatal("instance B must not inherit global ack from A")
+	}
+}
+
+func TestIsFullyAcked_NonPopupOverridesIgnored(t *testing.T) {
+	clock := &mockClock{now: time.Date(2026, 2, 4, 9, 0, 0, 0, time.UTC)}
+	ackStore := newMockAckStore()
+	finder := NewFinder(ackStore, clock, Config{WarnBefore: 5 * time.Minute})
+
+	start := clock.now.Add(3 * time.Minute)
+	event := makeEvent("evt1", "Email Override", start, clock.now.Add(1*time.Hour))
+	event.Reminders.Overrides = []calendar.ReminderOverride{
+		{Method: "email", Minutes: 10},
+	}
+
+	ackStore.setAcked(AckEventKey("evt1", start), "global")
+	if !finder.IsFullyAcked(event, start) {
+		t.Fatal("expected non-popup overrides to be ignored")
+	}
+}
+
 func TestFindNext_NoAckShouldStillShowStarted(t *testing.T) {
 	// Scenario: User never acked any reminder, meeting has started.
 	// They SHOULD get a "started" alert.
