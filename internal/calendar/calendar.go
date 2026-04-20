@@ -93,6 +93,19 @@ func FetchEvents(from, to, backend string) ([]Event, string, error) {
 	}
 }
 
+// LookbackStart returns the earlier of (now - minLookback) and the start of
+// now's calendar day (in now's own location). This keeps a rolling minimum
+// window but always covers everything from 00:00 today so the dashboard can
+// show events earlier in the day even hours later.
+func LookbackStart(now time.Time, minLookback time.Duration) time.Time {
+	rolling := now.Add(-minLookback)
+	startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	if startOfDay.Before(rolling) {
+		return startOfDay
+	}
+	return rolling
+}
+
 // Poll fetches events from Google Calendar and returns valid events only.
 // lookaheadDays controls how far ahead to look (0 defaults to 3 days).
 func Poll(backend string, lookaheadDays int) []Event {
@@ -100,7 +113,7 @@ func Poll(backend string, lookaheadDays int) []Event {
 		lookaheadDays = 3
 	}
 	now := time.Now()
-	from := now.Add(-1 * time.Hour).Format(time.RFC3339)
+	from := LookbackStart(now, 1*time.Hour).Format(time.RFC3339)
 	to := now.Add(time.Duration(lookaheadDays) * 24 * time.Hour).Format(time.RFC3339)
 
 	events, usedBackend, err := FetchEvents(from, to, backend)

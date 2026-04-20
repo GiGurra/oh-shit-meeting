@@ -13,6 +13,10 @@ type AckStore interface {
 	MarkAcked(eventID, reminderID string) error
 }
 
+// EventAckID marks a whole event as acknowledged — suppresses every
+// reminder (custom, global, and "started") for that occurrence.
+const EventAckID = "event"
+
 // Clock provides the current time (mockable for tests)
 type Clock interface {
 	Now() time.Time
@@ -89,6 +93,11 @@ func (f *Finder) FindNext(events []calendar.Event) *Info {
 
 		timeUntil := startTime.Sub(now)
 		ackKey := AckEventKey(event.ID, startTime)
+
+		// Skip if the user ack'd the whole event from the dashboard
+		if f.ackStore.IsAcked(ackKey, EventAckID) {
+			continue
+		}
 
 		// Skip events that have already ended
 		if now.After(endTime) {

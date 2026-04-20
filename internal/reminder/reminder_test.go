@@ -34,6 +34,11 @@ func (s *mockAckStore) MarkAcked(eventID, reminderID string) error {
 	return nil
 }
 
+func (s *mockAckStore) Unack(eventID, reminderID string) error {
+	delete(s.acked, eventID+":"+reminderID)
+	return nil
+}
+
 func (s *mockAckStore) setAcked(eventID, reminderID string) {
 	s.acked[eventID+":"+reminderID] = true
 }
@@ -661,6 +666,66 @@ func TestFindNext_AckEventKeyIncludesStartTime(t *testing.T) {
 	otherKey := AckEventKey("abc123", otherStart)
 	if key == otherKey {
 		t.Error("expected different ack keys for different start times")
+	}
+}
+
+func TestFindNext_EventAckSuppressesGlobal(t *testing.T) {
+	// Acking the whole event from the dashboard must suppress the global
+	// warn-before alert entirely.
+	now := time.Date(2026, 2, 4, 9, 0, 0, 0, time.UTC)
+	clock := &mockClock{now: now}
+	ackStore := newMockAckStore()
+	finder := NewFinder(ackStore, clock, Config{WarnBefore: 5 * time.Minute})
+
+	start := now.Add(3 * time.Minute)
+	end := now.Add(1 * time.Hour)
+	event := makeEvent("evt1", "Event-Acked Meeting", start, end)
+	events := []calendar.Event{event}
+
+	ackStore.setAcked(AckEventKey("evt1", start), EventAckID)
+
+	if result := finder.FindNext(events); result != nil {
+		t.Errorf("expected nil for event-acked meeting, got reminder %s", result.ReminderID)
+	}
+}
+
+func TestFindNext_EventAckSuppressesStarted(t *testing.T) {
+	// Event-level ack must also suppress the "started" alert, unlike custom
+	// (10m, 30m, …) acks which only suppress that one specific reminder.
+	now := time.Date(2026, 2, 4, 9, 5, 0, 0, time.UTC)
+	clock := &mockClock{now: now}
+	ackStore := newMockAckStore()
+	finder := NewFinder(ackStore, clock, Config{WarnBefore: 5 * time.Minute})
+
+	start := now.Add(-5 * time.Minute)
+	end := now.Add(25 * time.Minute)
+	event := makeEvent("evt1", "Event-Acked Started", start, end)
+	events := []calendar.Event{event}
+
+	ackStore.setAcked(AckEventKey("evt1", start), EventAckID)
+
+	if result := finder.FindNext(events); result != nil {
+		t.Errorf("expected nil (event ack suppresses started), got %s", result.ReminderID)
+	}
+}
+
+func TestFindNext_EventAckSuppressesCustomReminders(t *testing.T) {
+	// Custom reminders (10m popup) must also be suppressed when the user
+	// ack'd the whole event.
+	now := time.Date(2026, 2, 4, 9, 0, 0, 0, time.UTC)
+	clock := &mockClock{now: now}
+	ackStore := newMockAckStore()
+	finder := NewFinder(ackStore, clock, Config{WarnBefore: 1 * time.Minute})
+
+	start := now.Add(8 * time.Minute)
+	end := now.Add(1 * time.Hour)
+	event := makeEventWithReminders("evt1", "Custom Reminder Event-Acked", start, end, 10)
+	events := []calendar.Event{event}
+
+	ackStore.setAcked(AckEventKey("evt1", start), EventAckID)
+
+	if result := finder.FindNext(events); result != nil {
+		t.Errorf("expected nil (event ack suppresses custom), got %s", result.ReminderID)
 	}
 }
 

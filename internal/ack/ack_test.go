@@ -174,3 +174,82 @@ func TestFileStore_Integration(t *testing.T) {
 		t.Error("expected acked after marking")
 	}
 }
+
+func TestUnack_RemovesExistingAck(t *testing.T) {
+	tmpDir := t.TempDir()
+	originalDirFunc := dirFunc
+	dirFunc = func() string { return tmpDir }
+	defer func() { dirFunc = originalDirFunc }()
+
+	if err := MarkAcked("evt-unack", "event"); err != nil {
+		t.Fatalf("MarkAcked failed: %v", err)
+	}
+	if !IsAcked("evt-unack", "event") {
+		t.Fatal("expected ack present before unack")
+	}
+
+	if err := Unack("evt-unack", "event"); err != nil {
+		t.Fatalf("Unack failed: %v", err)
+	}
+	if IsAcked("evt-unack", "event") {
+		t.Error("expected ack removed after Unack")
+	}
+}
+
+func TestUnack_IsIdempotent(t *testing.T) {
+	tmpDir := t.TempDir()
+	originalDirFunc := dirFunc
+	dirFunc = func() string { return tmpDir }
+	defer func() { dirFunc = originalDirFunc }()
+
+	// Unacking a never-created ack is not an error.
+	if err := Unack("evt-never", "event"); err != nil {
+		t.Fatalf("Unack on missing file should succeed, got %v", err)
+	}
+	// Unacking twice is not an error.
+	_ = MarkAcked("evt-twice", "event")
+	if err := Unack("evt-twice", "event"); err != nil {
+		t.Fatalf("first Unack failed: %v", err)
+	}
+	if err := Unack("evt-twice", "event"); err != nil {
+		t.Fatalf("second Unack should be idempotent, got %v", err)
+	}
+}
+
+func TestUnack_DoesNotAffectOtherReminders(t *testing.T) {
+	tmpDir := t.TempDir()
+	originalDirFunc := dirFunc
+	dirFunc = func() string { return tmpDir }
+	defer func() { dirFunc = originalDirFunc }()
+
+	_ = MarkAcked("evt-multi", "event")
+	_ = MarkAcked("evt-multi", "10m")
+
+	if err := Unack("evt-multi", "event"); err != nil {
+		t.Fatalf("Unack failed: %v", err)
+	}
+	if IsAcked("evt-multi", "event") {
+		t.Error("expected event ack to be removed")
+	}
+	if !IsAcked("evt-multi", "10m") {
+		t.Error("expected 10m ack to survive Unack of event")
+	}
+}
+
+func TestFileStore_Unack(t *testing.T) {
+	tmpDir := t.TempDir()
+	originalDirFunc := dirFunc
+	dirFunc = func() string { return tmpDir }
+	defer func() { dirFunc = originalDirFunc }()
+
+	store := &FileStore{}
+	if err := store.MarkAcked("evt-store", "event"); err != nil {
+		t.Fatalf("MarkAcked failed: %v", err)
+	}
+	if err := store.Unack("evt-store", "event"); err != nil {
+		t.Fatalf("FileStore.Unack failed: %v", err)
+	}
+	if store.IsAcked("evt-store", "event") {
+		t.Error("expected ack removed after FileStore.Unack")
+	}
+}

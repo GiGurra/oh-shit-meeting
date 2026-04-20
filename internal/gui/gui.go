@@ -23,8 +23,11 @@ import (
 )
 
 type Config struct {
-	Port     int
-	EventsFn func() []calendar.Event
+	Port           int
+	EventsFn       func() []calendar.Event
+	IsEventAckedFn func(eventID string, startTime time.Time) bool
+	AckEventFn     func(eventID string, startTime time.Time) error
+	UnackEventFn   func(eventID string, startTime time.Time) error
 }
 
 type ReminderInfo struct {
@@ -73,6 +76,8 @@ func Init(c Config) error {
 	mux.HandleFunc("/", guardLocal(handleIndex))
 	mux.HandleFunc("/state", guardLocal(handleState))
 	mux.HandleFunc("/ack", guardLocal(handleAck))
+	mux.HandleFunc("/ack-event", guardLocal(handleEventAck))
+	mux.HandleFunc("/unack-event", guardLocal(handleEventUnack))
 
 	addr := fmt.Sprintf("127.0.0.1:%d", cfg.Port)
 	ln, err := net.Listen("tcp", addr)
@@ -190,18 +195,19 @@ type alertDTO struct {
 }
 
 type eventDTO struct {
-	ID          string             `json:"id"`
-	Summary     string             `json:"summary"`
-	StartTime   time.Time          `json:"startTime"`
-	EndTime     time.Time          `json:"endTime,omitempty"`
-	Location    string             `json:"location,omitempty"`
-	Organizer   string             `json:"organizer,omitempty"`
-	Calendar    string             `json:"calendar,omitempty"`
-	Description string             `json:"description,omitempty"`
-	HangoutLink string             `json:"hangoutLink,omitempty"`
-	HtmlLink    string             `json:"htmlLink,omitempty"`
-	Attendees   []attendeeDTO      `json:"attendees,omitempty"`
-	Status      string             `json:"status,omitempty"`
+	ID          string        `json:"id"`
+	Summary     string        `json:"summary"`
+	StartTime   time.Time     `json:"startTime"`
+	EndTime     time.Time     `json:"endTime,omitempty"`
+	Location    string        `json:"location,omitempty"`
+	Organizer   string        `json:"organizer,omitempty"`
+	Calendar    string        `json:"calendar,omitempty"`
+	Description string        `json:"description,omitempty"`
+	HangoutLink string        `json:"hangoutLink,omitempty"`
+	HtmlLink    string        `json:"htmlLink,omitempty"`
+	Attendees   []attendeeDTO `json:"attendees,omitempty"`
+	Status      string        `json:"status,omitempty"`
+	Acked       bool          `json:"acked,omitempty"`
 }
 
 type attendeeDTO struct {
@@ -214,6 +220,7 @@ type attendeeDTO struct {
 
 type stateDTO struct {
 	Alert    *alertDTO  `json:"alert,omitempty"`
+	Previous []eventDTO `json:"previous"`
 	Upcoming []eventDTO `json:"upcoming"`
 	Now      time.Time  `json:"now"`
 }
@@ -299,9 +306,11 @@ func handleState(w http.ResponseWriter, r *http.Request) {
 	}
 	mu.Unlock()
 
+	previous, upcoming := visibleEvents()
 	resp := stateDTO{
 		Alert:    al,
-		Upcoming: upcomingEvents(),
+		Previous: previous,
+		Upcoming: upcoming,
 		Now:      time.Now(),
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -333,13 +342,60 @@ func handleAck(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func upcomingEvents() []eventDTO {
-	if cfg.EventsFn == nil {
-		return nil
+func handleEventAck(w http.ResponseWriter, r *http.Request) {
+	handleEventAckChange(w, r, cfg.AckEventFn, "ack")
+}
+
+func handleEventUnack(w http.ResponseWriter, r *http.Request) {
+	handleEventAckChange(w, r, cfg.UnackEventFn, "unack")
+}
+
+func handleEventAckChange(w http.ResponseWriter, r *http.Request, fn func(string, time.Time) error, label string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
 	}
-	events := cfg.EventsFn()
-	out := make([]eventDTO, 0, len(events))
-	cutoff := time.Now().Add(-15 * time.Minute)
+	if fn == nil {
+		http.Error(w, label+" not configured", http.StatusInternalServerError)
+		return
+	}
+	eventID := r.URL.Query().Get("eventId")
+	startStr := r.URL.Query().Get("startTime")
+	if eventID == "" || startStr == "" {
+		http.Error(w, "missing eventId or startTime", http.StatusBadRequest)
+		return
+	}
+	st, err := time.Parse(time.RFC3339, startStr)
+	if err != nil {
+		http.Error(w, "invalid startTime", http.StatusBadRequest)
+		return
+	}
+	if err := fn(eventID, st); err != nil {
+		slog.Error("event "+label+" failed", "error", err, "eventId", eventID)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// visibleEvents splits the current event list into past (within the last hour)
+// and future events. Both lists are used by the dashboard.
+func visibleEvents() (previous, upcoming []eventDTO) {
+	if cfg.EventsFn == nil {
+		return nil, nil
+	}
+	return splitEvents(cfg.EventsFn(), time.Now(), cfg.IsEventAckedFn)
+}
+
+// splitEvents is the pure, testable core of visibleEvents. It keeps events
+// whose start falls in the window [lookback, ∞) and splits them around now.
+// Lookback is the earlier of (now - 1h) and start-of-today, so mid-afternoon
+// reloads still show the morning's events.
+// isAcked may be nil, in which case Acked is always false.
+func splitEvents(events []calendar.Event, now time.Time, isAcked func(string, time.Time) bool) (previous, upcoming []eventDTO) {
+	lookback := calendar.LookbackStart(now, 1*time.Hour)
+	previous = make([]eventDTO, 0)
+	upcoming = make([]eventDTO, 0)
 	for _, e := range events {
 		if e.Start.DateTime == "" {
 			continue
@@ -348,43 +404,55 @@ func upcomingEvents() []eventDTO {
 		if err != nil {
 			continue
 		}
-		if st.Before(cutoff) {
+		if st.Before(lookback) {
 			continue
 		}
-		org := e.Organizer.DisplayName
-		if org == "" {
-			org = e.Organizer.Email
+		dto := toEventDTO(e, st)
+		if isAcked != nil {
+			dto.Acked = isAcked(e.ID, st)
 		}
-		var end time.Time
-		if e.End.DateTime != "" {
-			end, _ = time.Parse(time.RFC3339, e.End.DateTime)
+		if st.Before(now) {
+			previous = append(previous, dto)
+		} else {
+			upcoming = append(upcoming, dto)
 		}
-		attendees := make([]attendeeDTO, 0, len(e.Attendees))
-		for _, a := range e.Attendees {
-			attendees = append(attendees, attendeeDTO{
-				Email:          a.Email,
-				DisplayName:    a.DisplayName,
-				ResponseStatus: a.ResponseStatus,
-				Self:           a.Self,
-				Organizer:      a.Organizer,
-			})
-		}
-		out = append(out, eventDTO{
-			ID:          e.ID,
-			Summary:     e.Summary,
-			StartTime:   st,
-			EndTime:     end,
-			Location:    e.Location,
-			Organizer:   org,
-			Calendar:    e.Calendar,
-			Description: e.Description,
-			HangoutLink: e.HangoutLink,
-			HtmlLink:    e.HtmlLink,
-			Attendees:   attendees,
-			Status:      e.Status,
+	}
+	return previous, upcoming
+}
+
+func toEventDTO(e calendar.Event, st time.Time) eventDTO {
+	org := e.Organizer.DisplayName
+	if org == "" {
+		org = e.Organizer.Email
+	}
+	var end time.Time
+	if e.End.DateTime != "" {
+		end, _ = time.Parse(time.RFC3339, e.End.DateTime)
+	}
+	attendees := make([]attendeeDTO, 0, len(e.Attendees))
+	for _, a := range e.Attendees {
+		attendees = append(attendees, attendeeDTO{
+			Email:          a.Email,
+			DisplayName:    a.DisplayName,
+			ResponseStatus: a.ResponseStatus,
+			Self:           a.Self,
+			Organizer:      a.Organizer,
 		})
 	}
-	return out
+	return eventDTO{
+		ID:          e.ID,
+		Summary:     e.Summary,
+		StartTime:   st,
+		EndTime:     end,
+		Location:    e.Location,
+		Organizer:   org,
+		Calendar:    e.Calendar,
+		Description: e.Description,
+		HangoutLink: e.HangoutLink,
+		HtmlLink:    e.HtmlLink,
+		Attendees:   attendees,
+		Status:      e.Status,
+	}
 }
 
 // ---------------- helpers ----------------
@@ -484,7 +552,46 @@ const indexHTML = `<!doctype html>
   .event[open] > summary::before { transform: rotate(90deg); }
   .event .title { font-weight: 600; font-size: 1.1rem; }
   .event .meta { font-size: 0.9rem; opacity: 0.8; margin-top: 0.25rem; padding-left: 1em; }
+  .event.acked > summary .title { text-decoration: line-through; opacity: 0.6; }
+  .event.acked > summary { opacity: 0.85; }
+  /* Collapsed acked rows shrink to a single ellipsized line so they don't
+     compete for attention with events that still need action. */
+  .event.acked:not([open]) > summary {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding-right: 1rem;
+  }
+  .event.acked:not([open]) > summary .meta {
+    display: inline;
+    margin-top: 0;
+    padding-left: 0.5rem;
+    font-size: 0.85rem;
+  }
+  .ack-badge {
+    display: inline-block; margin-left: 0.4rem; padding: 0.05rem 0.45rem;
+    background: #1a7f1a; color: white; border-radius: 999px;
+    font-size: 0.7rem; font-weight: 600; vertical-align: middle; letter-spacing: 0.02em;
+  }
   .event .body { padding: 0.25rem 1rem 1rem 2rem; border-top: 1px solid #ccc3; }
+  .ack-actions { margin-top: 0.75rem; display: flex; gap: 0.5rem; flex-wrap: wrap; }
+  .ack-btn {
+    font-size: 0.9rem; padding: 0.35rem 0.85rem; border-radius: 0.25rem;
+    border: 1px solid #ccc5; background: transparent; cursor: pointer; color: inherit;
+  }
+  .ack-btn:hover { background: #ccc3; }
+  .ack-btn.primary { background: #1a7f1a; color: white; border-color: #1a7f1a; }
+  .ack-btn.primary:hover { background: #156515; }
+  .previous-group { margin-bottom: 1rem; }
+  .previous-group > summary {
+    cursor: pointer; padding: 0.5rem 0; font-weight: 600; list-style: none;
+    font-size: 0.95rem; opacity: 0.8;
+  }
+  .previous-group > summary::-webkit-details-marker { display: none; }
+  .previous-group > summary::before {
+    content: "▸"; display: inline-block; width: 1em; transition: transform 0.15s; opacity: 0.6;
+  }
+  .previous-group[open] > summary::before { transform: rotate(90deg); }
   .event .body section { margin-top: 0.75rem; }
   .event .body h3 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; opacity: 0.6; margin: 0 0 0.25rem; }
   .event .description { word-wrap: break-word; font-size: 0.95rem; line-height: 1.4; }
@@ -630,55 +737,137 @@ function renderEventBody(e) {
   if (e.htmlLink) {
     html += '<section><a class="cal-link" href="' + escapeAttr(e.htmlLink) + '" target="_blank" rel="noopener">Open in Google Calendar ↗</a></section>';
   }
+  html += renderAckActions(e);
   html += '</div>';
   return html;
 }
 
+function renderAckActions(e) {
+  if (!e.id) return "";
+  const payload = 'data-event-id="' + escapeAttr(e.id) + '" data-start="' + escapeAttr(e.startTime) + '"';
+  if (e.acked) {
+    return '<div class="ack-actions"><button class="ack-btn unack-btn" ' + payload + '>Remove ack</button></div>';
+  }
+  return '<div class="ack-actions"><button class="ack-btn primary ack-btn-event" ' + payload + '>Acknowledge</button></div>';
+}
+
 function eventKey(e) {
-  return (e.id || "") + "|" + (e.summary || "") + "|" + (e.startTime || "") + "|" + (e.hangoutLink || "") + "|" + ((e.attendees || []).length) + "|" + (e.description || "").length + "|" + (e.location || "");
+  return (e.id || "") + "|" + (e.summary || "") + "|" + (e.startTime || "") + "|" + (e.hangoutLink || "") + "|" + ((e.attendees || []).length) + "|" + (e.description || "").length + "|" + (e.location || "") + "|" + (e.acked ? "1" : "0");
+}
+
+function renderEventListItem(e, now) {
+  const start = new Date(e.startTime);
+  const cls = 'event' + (e.acked ? ' acked' : '');
+  const detailsKey = 'event:' + (e.id || '') + '|' + (e.startTime || '');
+  let html = '<li><details class="' + cls + '" data-details-key="' + escapeAttr(detailsKey) + '"><summary>';
+  html += '<span class="title">' + escapeHtml(e.summary || "(no title)") + '</span>';
+  if (e.hangoutLink) html += ' <span class="meet-badge" title="Has Google Meet">📹</span>';
+  if (e.acked) html += ' <span class="ack-badge">✓ ACKED</span>';
+  html += '<div class="meta">';
+  html += '<span class="countdown">' + fmtDateTime(start) + ' — ' + relPhrase(start.getTime(), now) + '</span>';
+  if (e.calendar)  html += ' · 📅 ' + escapeHtml(e.calendar);
+  if (e.organizer) html += ' · ' + escapeHtml(e.organizer);
+  if (e.location)  html += ' · ' + escapeHtml(e.location);
+  html += '</div>';
+  html += '</summary>';
+  html += renderEventBody(e);
+  html += '</details></li>';
+  return html;
 }
 
 function renderDashboard(state) {
+  const previous = state.previous || [];
   const upcoming = state.upcoming || [];
   const now = new Date(state.now).getTime();
-  const key = "dash:" + upcoming.map(eventKey).join(";;");
+  const key = "dash:" + previous.map(eventKey).join(";;") + "::" + upcoming.map(eventKey).join(";;");
   if (key !== lastRendered) {
     let html = '<div class="dashboard">';
     html += '<h1>oh-shit-meeting <span class="status">running</span></h1>';
+
+    if (previous.length > 0) {
+      html += '<details class="previous-group" data-details-key="previous-group"><summary>Previous (' + previous.length + ')</summary>';
+      html += '<ul class="events" style="list-style:none;padding:0">';
+      for (const e of previous) html += renderEventListItem(e, now);
+      html += '</ul></details>';
+    }
+
     html += '<h2>Upcoming</h2>';
     if (upcoming.length === 0) {
       html += '<p class="empty">No upcoming events.</p>';
     } else {
       html += '<ul class="events" style="list-style:none;padding:0">';
-      for (const e of upcoming) {
-        const start = new Date(e.startTime);
-        html += '<li><details class="event"><summary>';
-        html += '<span class="title">' + escapeHtml(e.summary || "(no title)") + '</span>';
-        if (e.hangoutLink) html += ' <span class="meet-badge" title="Has Google Meet">📹</span>';
-        html += '<div class="meta">';
-        html += '<span class="countdown">' + fmtDateTime(start) + ' — ' + relPhrase(start.getTime(), now) + '</span>';
-        if (e.calendar)  html += ' · 📅 ' + escapeHtml(e.calendar);
-        if (e.organizer) html += ' · ' + escapeHtml(e.organizer);
-        if (e.location)  html += ' · ' + escapeHtml(e.location);
-        html += '</div>';
-        html += '</summary>';
-        html += renderEventBody(e);
-        html += '</details></li>';
-      }
+      for (const e of upcoming) html += renderEventListItem(e, now);
       html += '</ul>';
     }
     html += '</div>';
+    const openKeys = captureOpenDetails();
     root.innerHTML = html;
+    restoreOpenDetails(openKeys);
     lastRendered = key;
+    bindAckButtons();
   } else {
     // live-update countdowns without collapsing any open accordion
     const spans = root.querySelectorAll(".countdown");
-    upcoming.forEach((e, i) => {
+    const all = previous.concat(upcoming);
+    all.forEach((e, i) => {
       if (!spans[i]) return;
       const start = new Date(e.startTime);
       spans[i].textContent = fmtDateTime(start) + ' — ' + relPhrase(start.getTime(), now);
     });
   }
+}
+
+// captureOpenDetails records which <details data-details-key="…"> blocks are
+// currently expanded so the set can be re-applied after a re-render. Without
+// this, acking an event collapses the "Previous" section and any open event.
+function captureOpenDetails() {
+  const keys = new Set();
+  root.querySelectorAll("details[data-details-key]").forEach(d => {
+    if (d.open) keys.add(d.dataset.detailsKey);
+  });
+  return keys;
+}
+
+function restoreOpenDetails(keys) {
+  if (!keys || keys.size === 0) return;
+  root.querySelectorAll("details[data-details-key]").forEach(d => {
+    if (keys.has(d.dataset.detailsKey)) d.open = true;
+  });
+}
+
+function bindAckButtons() {
+  root.querySelectorAll(".ack-btn-event").forEach(btn => {
+    btn.addEventListener("click", ev => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      ackEvent(btn.dataset.eventId, btn.dataset.start, "/ack-event", true);
+    });
+  });
+  root.querySelectorAll(".unack-btn").forEach(btn => {
+    btn.addEventListener("click", ev => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      ackEvent(btn.dataset.eventId, btn.dataset.start, "/unack-event", false);
+    });
+  });
+}
+
+async function ackEvent(eventId, startTime, endpoint, collapseAfter) {
+  if (!eventId || !startTime) return;
+  try {
+    await fetch(endpoint + "?eventId=" + encodeURIComponent(eventId) + "&startTime=" + encodeURIComponent(startTime), { method: "POST" });
+  } catch (e) { /* ignore */ }
+  if (collapseAfter) {
+    // Collapse the acked event before re-render so captureOpenDetails doesn't
+    // record it as open. The Previous category keeps its open state.
+    const detailsKey = 'event:' + eventId + '|' + startTime;
+    root.querySelectorAll('details[data-details-key]').forEach(d => {
+      if (d.dataset.detailsKey === detailsKey) d.open = false;
+    });
+  }
+  // Force re-render to reflect new ack state without waiting for the next poll.
+  lastRendered = "";
+  tick();
 }
 
 function renderPanic(state) {

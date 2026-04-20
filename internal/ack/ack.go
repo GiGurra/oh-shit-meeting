@@ -12,6 +12,7 @@ import (
 type Store interface {
 	IsAcked(eventID, reminderID string) bool
 	MarkAcked(eventID, reminderID string) error
+	Unack(eventID, reminderID string) error
 }
 
 // FileStore implements Store using the filesystem
@@ -23,6 +24,10 @@ func (s *FileStore) IsAcked(eventID, reminderID string) bool {
 
 func (s *FileStore) MarkAcked(eventID, reminderID string) error {
 	return MarkAcked(eventID, reminderID)
+}
+
+func (s *FileStore) Unack(eventID, reminderID string) error {
+	return Unack(eventID, reminderID)
 }
 
 // dirFunc returns the directory for storing ack files.
@@ -58,6 +63,15 @@ func MarkAcked(eventID, reminderID string) error {
 		return fmt.Errorf("failed to create ack file: %w", err)
 	}
 	return f.Close()
+}
+
+// Unack removes a single ack marker. Missing files are treated as success
+// so callers can idempotently "remove ack" without checking first.
+func Unack(eventID, reminderID string) error {
+	if err := os.Remove(path(eventID, reminderID)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to remove ack file: %w", err)
+	}
+	return nil
 }
 
 // Cleanup removes ack directories older than maxAge.

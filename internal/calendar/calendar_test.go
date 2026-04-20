@@ -205,3 +205,40 @@ func TestEvent_WorkingLocationFiltering(t *testing.T) {
 func TestDefaultFetcher_ImplementsInterface(t *testing.T) {
 	var _ Fetcher = &DefaultFetcher{}
 }
+
+func TestLookbackStart_UsesStartOfDayWhenEarlier(t *testing.T) {
+	// Mid-afternoon: start-of-day (00:00) is earlier than now-1h (15:00),
+	// so the function should return start-of-day.
+	now := time.Date(2026, 4, 20, 16, 0, 0, 0, time.UTC)
+	got := LookbackStart(now, 1*time.Hour)
+	want := time.Date(2026, 4, 20, 0, 0, 0, 0, time.UTC)
+	if !got.Equal(want) {
+		t.Errorf("LookbackStart(16:00, 1h) = %v, want %v", got, want)
+	}
+}
+
+func TestLookbackStart_UsesRollingWindowWhenEarlier(t *testing.T) {
+	// 00:30 today: now-1h (23:30 yesterday) is earlier than start-of-day
+	// (today 00:00), so use the rolling window.
+	now := time.Date(2026, 4, 20, 0, 30, 0, 0, time.UTC)
+	got := LookbackStart(now, 1*time.Hour)
+	want := time.Date(2026, 4, 19, 23, 30, 0, 0, time.UTC)
+	if !got.Equal(want) {
+		t.Errorf("LookbackStart(00:30, 1h) = %v, want %v", got, want)
+	}
+}
+
+func TestLookbackStart_PreservesLocation(t *testing.T) {
+	// start-of-day must use now's own location so Poll's local-time semantics
+	// are preserved across timezones.
+	loc := time.FixedZone("CET", 2*60*60)
+	now := time.Date(2026, 4, 20, 10, 0, 0, 0, loc)
+	got := LookbackStart(now, 1*time.Hour)
+	if got.Location() != loc {
+		t.Errorf("expected location %v, got %v", loc, got.Location())
+	}
+	want := time.Date(2026, 4, 20, 0, 0, 0, 0, loc)
+	if !got.Equal(want) {
+		t.Errorf("LookbackStart CET 10:00 = %v, want %v", got, want)
+	}
+}

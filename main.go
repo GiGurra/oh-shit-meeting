@@ -295,14 +295,24 @@ func run(params *Params) {
 	ack.Cleanup(7 * 24 * time.Hour)
 
 	store := &eventStore{}
+	ackStore := &ack.FileStore{}
 	if err := gui.Init(gui.Config{
 		Port:     params.Port,
 		EventsFn: store.get,
+		IsEventAckedFn: func(eventID string, startTime time.Time) bool {
+			return ackStore.IsAcked(reminder.AckEventKey(eventID, startTime), reminder.EventAckID)
+		},
+		AckEventFn: func(eventID string, startTime time.Time) error {
+			return ackStore.MarkAcked(reminder.AckEventKey(eventID, startTime), reminder.EventAckID)
+		},
+		UnackEventFn: func(eventID string, startTime time.Time) error {
+			return ackStore.Unack(reminder.AckEventKey(eventID, startTime), reminder.EventAckID)
+		},
 	}); err != nil {
 		slog.Error("failed to init dashboard", "error", err)
 		os.Exit(1)
 	}
-	go runLoop(params, store)
+	go runLoop(params, store, ackStore)
 	gui.Run()
 }
 
@@ -367,8 +377,7 @@ func (s *eventStore) set(e []calendar.Event) {
 	s.mu.Unlock()
 }
 
-func runLoop(params *Params, store *eventStore) {
-	ackStore := &ack.FileStore{}
+func runLoop(params *Params, store *eventStore, ackStore *ack.FileStore) {
 	clock := &reminder.RealClock{}
 	finder := reminder.NewFinder(ackStore, clock, reminder.Config{
 		WarnBefore: params.WarnBefore,
