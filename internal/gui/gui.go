@@ -687,18 +687,20 @@ function fmtDuration(ms) {
   return sign + m + "m " + pad(s) + "s";
 }
 
+// Time formatting uses timeStyle: "short" so each locale picks its own hour
+// cycle (24h in sv-SE, 12h AM/PM in en-US). Explicit hour: "2-digit" would
+// make Chrome force 12h for en-US regardless, so we avoid it.
 function fmtTime(d) {
-  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return d.toLocaleTimeString([], { timeStyle: "short" });
 }
 
 function fmtDateTime(d) {
-  return d.toLocaleString([], {
+  const date = d.toLocaleDateString([], {
     weekday: "short",
     day: "2-digit",
     month: "short",
-    hour: "2-digit",
-    minute: "2-digit",
   });
+  return date + " " + d.toLocaleTimeString([], { timeStyle: "short" });
 }
 
 function relPhrase(startMs, nowMs) {
