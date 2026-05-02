@@ -1045,6 +1045,8 @@ function renderPanic(state) {
     root.innerHTML = html;
     lastRendered = key;
     document.getElementById("ackBtn").addEventListener("click", () => ack(a.reminderId));
+    const joinEl = root.querySelector('a.join-meet');
+    if (joinEl) joinEl.addEventListener("click", () => ack(a.reminderId));
     if (a.fullscreen && !wasFullscreen) {
       wasFullscreen = true;
       // best-effort — browsers may reject without a user gesture
