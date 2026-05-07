@@ -288,10 +288,9 @@ func run(params *Params) {
 		slog.Warn("Google auth: not configured — run 'oh-shit-meeting auth'")
 	}
 
-	// Re-auth before starting if token is stale
-	calendar.ReAuthIfStale()
-
-	// Clean up ack files older than 7 days
+	// Clean up ack files older than 7 days. The poll loop calls
+	// ReAuthIfStale itself, so we don't block tray startup on a browser
+	// flow here.
 	ack.Cleanup(7 * 24 * time.Hour)
 
 	store := &eventStore{}
@@ -301,8 +300,10 @@ func run(params *Params) {
 		Sound:      params.Sound,
 	})
 	if err := gui.Init(gui.Config{
-		Port:     params.Port,
-		EventsFn: store.get,
+		Port:          params.Port,
+		EventsFn:      store.get,
+		AuthStatusFn:  buildAuthStatus,
+		ReAuthFn:      reAuth,
 		IsEventAckedFn: func(eventID string, startTime time.Time) bool {
 			return ackStore.IsAcked(reminder.AckEventKey(eventID, startTime), reminder.EventAckID)
 		},
@@ -350,6 +351,32 @@ func run(params *Params) {
 	}
 	go runLoop(params, store, ackStore, finder)
 	gui.Run()
+}
+
+// buildAuthStatus exposes the calendar package's auth state to the gui layer
+// without forcing it to import calendar directly.
+func buildAuthStatus() gui.AuthStatus {
+	st := calendar.GetTokenStatus()
+	maxAge := calendar.MaxTokenAge()
+	out := gui.AuthStatus{
+		HasToken:        st.HasToken,
+		HasCredentials:  st.HasCredentials,
+		AuthenticatedAt: st.AuthenticatedAt,
+		MaxAge:          maxAge,
+	}
+	if !st.AuthenticatedAt.IsZero() {
+		out.ExpiresAt = st.AuthenticatedAt.Add(maxAge)
+	}
+	return out
+}
+
+// reAuth runs the OAuth2 browser flow. Called from the tray menu and from a
+// dashboard button. Returns an error the caller can surface.
+func reAuth() error {
+	if !calendar.HasGoogleCredentials() {
+		return fmt.Errorf("no Google credentials configured — run 'oh-shit-meeting auth --interactive' from a terminal first")
+	}
+	return calendar.ReAuthenticate()
 }
 
 // findEvent returns the event with the given ID and start time from a slice.
