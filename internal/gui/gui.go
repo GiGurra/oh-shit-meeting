@@ -31,6 +31,37 @@ type Config struct {
 	RemindersFn      func(event calendar.Event, startTime time.Time) []Reminder
 	AckReminderFn    func(eventID string, startTime time.Time, reminderID string) error
 	UnackReminderFn  func(eventID string, startTime time.Time, reminderID string) error
+	// AuthStatusFn is called whenever the dashboard or tray needs to know
+	// whether browser auth is current. May be nil (tray stays green).
+	AuthStatusFn func() AuthStatus
+	// ReAuthFn triggers the OAuth2 browser flow. May be nil to disable the
+	// re-auth button and tray menu item.
+	ReAuthFn func() error
+}
+
+// AuthStatus describes the state of stored Google credentials. It's a thin
+// pass-through DTO so the gui package doesn't need to import the calendar
+// package's TokenStatus directly.
+type AuthStatus struct {
+	HasToken        bool
+	HasCredentials  bool
+	AuthenticatedAt time.Time
+	// ExpiresAt is when the stored auth crosses the "needs browser re-auth"
+	// threshold (AuthenticatedAt + MaxAge). Zero if AuthenticatedAt is zero.
+	ExpiresAt time.Time
+	MaxAge    time.Duration
+}
+
+// NeedsAttention is true when the tray should pull the yellow icon: there's
+// no token at all, or the stored token has aged past ExpiresAt.
+func (s AuthStatus) NeedsAttention() bool {
+	if !s.HasToken {
+		return true
+	}
+	if s.ExpiresAt.IsZero() {
+		return false
+	}
+	return time.Now().After(s.ExpiresAt)
 }
 
 // Reminder mirrors reminder.ReminderState for the gui layer (kept here so
@@ -69,12 +100,14 @@ type Attendee struct {
 }
 
 var (
-	mu         sync.Mutex
-	active     *ReminderInfo
-	activeDone chan struct{}
-	cfg        Config
-	greenIcon  []byte
-	redIcon    []byte
+	mu          sync.Mutex
+	active      *ReminderInfo
+	activeDone  chan struct{}
+	cfg         Config
+	greenIcon   []byte
+	redIcon     []byte
+	yellowIcon  []byte
+	alertActive bool // protected by mu; true while an alert is flashing
 )
 
 // Init prepares icons and starts the local HTTP server.
@@ -83,6 +116,7 @@ func Init(c Config) error {
 	cfg = c
 	greenIcon = makeTrayIcon(color.RGBA{R: 30, G: 180, B: 30, A: 255})
 	redIcon = makeTrayIcon(color.RGBA{R: 200, G: 30, B: 30, A: 255})
+	yellowIcon = makeTrayIcon(color.RGBA{R: 230, G: 180, B: 30, A: 255})
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", guardLocal(handleIndex))
@@ -92,6 +126,7 @@ func Init(c Config) error {
 	mux.HandleFunc("/unack-event", guardLocal(handleEventUnack))
 	mux.HandleFunc("/ack-reminder", guardLocal(handleReminderAck))
 	mux.HandleFunc("/unack-reminder", guardLocal(handleReminderUnack))
+	mux.HandleFunc("/reauth", guardLocal(handleReAuth))
 
 	addr := fmt.Sprintf("127.0.0.1:%d", cfg.Port)
 	ln, err := net.Listen("tcp", addr)
@@ -113,7 +148,7 @@ func Run() {
 }
 
 func onReady() {
-	systray.SetIcon(greenIcon)
+	systray.SetIcon(currentBaseIcon())
 	systray.SetTitle("")
 	systray.SetTooltip("oh-shit-meeting — " + dashURL())
 
@@ -121,8 +156,22 @@ func onReady() {
 	mTitle.Disable()
 	systray.AddSeparator()
 	mOpen := systray.AddMenuItem("Open dashboard", dashURL())
+	mReAuth := systray.AddMenuItem("Re-authenticate", "Re-run the Google OAuth browser flow")
+	if cfg.ReAuthFn == nil {
+		mReAuth.Disable()
+	}
 	systray.AddSeparator()
 	mQuit := systray.AddMenuItem("Quit", "Quit oh-shit-meeting")
+
+	// Refresh the tray icon periodically so it flips to yellow when stored
+	// auth ages past the threshold without any other event nudging it.
+	go func() {
+		t := time.NewTicker(60 * time.Second)
+		defer t.Stop()
+		for range t.C {
+			refreshBaseIcon()
+		}
+	}()
 
 	go func() {
 		for {
@@ -131,12 +180,54 @@ func onReady() {
 				if err := openBrowser(dashURL()); err != nil {
 					slog.Warn("failed to open browser", "error", err)
 				}
+			case <-mReAuth.ClickedCh:
+				go runReAuth("tray")
 			case <-mQuit.ClickedCh:
 				systray.Quit()
 				return
 			}
 		}
 	}()
+}
+
+// runReAuth invokes cfg.ReAuthFn off the systray click goroutine so it can
+// block on the browser flow without freezing the menu. Refreshes the tray
+// icon when done so green/yellow reflects the new state.
+func runReAuth(source string) {
+	if cfg.ReAuthFn == nil {
+		slog.Warn("re-auth requested but ReAuthFn not configured", "source", source)
+		return
+	}
+	slog.Info("re-auth triggered", "source", source)
+	if err := cfg.ReAuthFn(); err != nil {
+		slog.Error("re-auth failed", "source", source, "error", err)
+	} else {
+		slog.Info("re-auth succeeded", "source", source)
+	}
+	refreshBaseIcon()
+}
+
+// currentBaseIcon picks the tray icon that should be shown when no alert
+// is firing. Yellow when auth needs attention, green otherwise.
+func currentBaseIcon() []byte {
+	if cfg.AuthStatusFn != nil {
+		if cfg.AuthStatusFn().NeedsAttention() {
+			return yellowIcon
+		}
+	}
+	return greenIcon
+}
+
+// refreshBaseIcon updates the tray icon to the base (non-flashing) state if
+// no alert is currently flashing. Safe to call from any goroutine.
+func refreshBaseIcon() {
+	mu.Lock()
+	flashing := alertActive
+	mu.Unlock()
+	if flashing {
+		return
+	}
+	systray.SetIcon(currentBaseIcon())
 }
 
 func dashURL() string {
@@ -171,17 +262,24 @@ func ShowPopupBlocking(info ReminderInfo) {
 }
 
 func flashTray(done <-chan struct{}) {
+	mu.Lock()
+	alertActive = true
+	mu.Unlock()
+
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	red := false
 	for {
 		select {
 		case <-done:
-			systray.SetIcon(greenIcon)
+			mu.Lock()
+			alertActive = false
+			mu.Unlock()
+			systray.SetIcon(currentBaseIcon())
 			return
 		case <-ticker.C:
 			if red {
-				systray.SetIcon(greenIcon)
+				systray.SetIcon(currentBaseIcon())
 			} else {
 				systray.SetIcon(redIcon)
 			}
@@ -244,6 +342,17 @@ type stateDTO struct {
 	Previous []eventDTO `json:"previous"`
 	Upcoming []eventDTO `json:"upcoming"`
 	Now      time.Time  `json:"now"`
+	Auth     *authDTO   `json:"auth,omitempty"`
+}
+
+type authDTO struct {
+	HasToken         bool      `json:"hasToken"`
+	HasCredentials   bool      `json:"hasCredentials"`
+	AuthenticatedAt  time.Time `json:"authenticatedAt,omitempty"`
+	ExpiresAt        time.Time `json:"expiresAt,omitempty"`
+	MaxAgeSeconds    int64     `json:"maxAgeSeconds"`
+	NeedsAttention   bool      `json:"needsAttention"`
+	CanReAuth        bool      `json:"canReAuth"`
 }
 
 // guardLocal rejects requests with a non-loopback Host header (blocking
@@ -333,9 +442,42 @@ func handleState(w http.ResponseWriter, r *http.Request) {
 		Previous: previous,
 		Upcoming: upcoming,
 		Now:      time.Now(),
+		Auth:     buildAuthDTO(),
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func buildAuthDTO() *authDTO {
+	if cfg.AuthStatusFn == nil {
+		return nil
+	}
+	s := cfg.AuthStatusFn()
+	return &authDTO{
+		HasToken:        s.HasToken,
+		HasCredentials:  s.HasCredentials,
+		AuthenticatedAt: s.AuthenticatedAt,
+		ExpiresAt:       s.ExpiresAt,
+		MaxAgeSeconds:   int64(s.MaxAge / time.Second),
+		NeedsAttention:  s.NeedsAttention(),
+		CanReAuth:       cfg.ReAuthFn != nil,
+	}
+}
+
+// handleReAuth kicks off the OAuth2 browser flow. Returns immediately so the
+// dashboard stays responsive — the caller polls /state to see when auth comes
+// back fresh.
+func handleReAuth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if cfg.ReAuthFn == nil {
+		http.Error(w, "re-auth not configured", http.StatusServiceUnavailable)
+		return
+	}
+	go runReAuth("dashboard")
+	w.WriteHeader(http.StatusAccepted)
 }
 
 func handleAck(w http.ResponseWriter, r *http.Request) {
@@ -690,6 +832,40 @@ const indexHTML = `<!doctype html>
   .empty { opacity: 0.6; font-style: italic; }
   .meet-badge { color: #1a73e8; font-weight: 600; }
 
+  /* Auth status row — small calm version when fresh, large alert version
+     when expired. Always at the very top of the dashboard. */
+  .auth-status {
+    border: 1px solid #ccc5; border-radius: 0.5rem;
+    padding: 0.5rem 0.75rem; margin: 0 0 1rem;
+    font-size: 0.9rem; opacity: 0.85;
+    display: flex; gap: 0.75rem; align-items: center; justify-content: space-between;
+    flex-wrap: wrap;
+  }
+  .auth-status.warn {
+    background: #fff8e1; border-color: #e6c14a; color: #6e4f00;
+    opacity: 1;
+  }
+  .auth-status.expired {
+    background: #c81e1e; border-color: #961414; color: white;
+    opacity: 1; font-size: 1.05rem;
+    padding: 1.25rem 1.5rem;
+  }
+  .auth-status.expired strong { font-size: 1.2rem; }
+  .auth-status .label { font-weight: 600; }
+  .auth-status .reauth-btn {
+    font-size: 0.95rem; padding: 0.45rem 1rem; font-weight: 600;
+    border-radius: 0.25rem; border: 1px solid currentColor;
+    background: transparent; cursor: pointer; color: inherit;
+  }
+  .auth-status.expired .reauth-btn {
+    background: white; color: #c81e1e; border-color: white; font-size: 1.1rem;
+    padding: 0.6rem 1.5rem;
+  }
+  .auth-status .reauth-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+  @media (prefers-color-scheme: dark) {
+    .auth-status.warn { background: #3a2f08; border-color: #b08a2c; color: #f4d27a; }
+  }
+
   .panic {
     position: fixed; inset: 0;
     display: flex; align-items: center; justify-content: center;
@@ -873,13 +1049,89 @@ function renderEventListItem(e, now) {
   return html;
 }
 
+function authStatusKey(auth) {
+  if (!auth) return "no-auth-block";
+  return [
+    auth.hasToken ? "1" : "0",
+    auth.hasCredentials ? "1" : "0",
+    auth.needsAttention ? "1" : "0",
+    auth.canReAuth ? "1" : "0",
+    auth.expiresAt || "",
+    auth.authenticatedAt || "",
+  ].join("|");
+}
+
+function renderAuthBlock(auth, nowMs) {
+  if (!auth) return "";
+  const expiresAt = auth.expiresAt ? new Date(auth.expiresAt).getTime() : 0;
+  const timeLeftMs = expiresAt ? (expiresAt - nowMs) : 0;
+  // Only offer the button when stored client credentials exist — otherwise
+  // we'd just fail and confuse the user. First-time setup needs the CLI.
+  const reauthBtn = (auth.canReAuth && auth.hasCredentials)
+    ? '<button class="reauth-btn" id="reAuthBtn">Re-authenticate now</button>'
+    : '<span style="opacity:0.8">Run <code>oh-shit-meeting auth --interactive</code> in a terminal</span>';
+
+  // Past expiry — big banner with button.
+  if (auth.needsAttention) {
+    let title;
+    if (!auth.hasToken && !auth.hasCredentials) {
+      title = "Not authenticated with Google Calendar";
+    } else if (!auth.hasToken) {
+      title = "Google Calendar token missing — re-auth required";
+    } else {
+      title = "Google Calendar auth expired — re-auth required";
+    }
+    let detail = "";
+    if (expiresAt && timeLeftMs <= 0) {
+      detail = ' <span class="countdown" id="reauthCountdown">expired ' + fmtDuration(-timeLeftMs) + ' ago</span>';
+    }
+    return '<div class="auth-status expired" data-state="expired">'
+      + '<div><strong>' + escapeHtml(title) + '</strong>' + detail + '</div>'
+      + '<div>' + reauthBtn + '</div>'
+      + '</div>';
+  }
+
+  // Fresh auth — small calm row.
+  if (!expiresAt) return "";
+  const warn = timeLeftMs < 24 * 60 * 60 * 1000; // <24h left
+  const cls = warn ? "auth-status warn" : "auth-status";
+  return '<div class="' + cls + '" data-state="ok">'
+    + '<div><span class="label">Google Calendar auth:</span> '
+    +   'fresh, re-auth required in <span class="countdown" id="reauthCountdown">'
+    +   fmtDuration(timeLeftMs) + '</span></div>'
+    + '<div>' + reauthBtn + '</div>'
+    + '</div>';
+}
+
+function bindReAuthButton() {
+  const btn = document.getElementById("reAuthBtn");
+  if (!btn) return;
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    const original = btn.textContent;
+    btn.textContent = "Opening browser…";
+    try {
+      await fetch("/reauth", { method: "POST" });
+    } catch (e) { /* ignore */ }
+    // Re-enable shortly so a failed/cancelled flow can be retried.
+    setTimeout(() => {
+      btn.disabled = false;
+      btn.textContent = original;
+    }, 4000);
+    lastRendered = "";
+    tick();
+  });
+}
+
 function renderDashboard(state) {
   const previous = state.previous || [];
   const upcoming = state.upcoming || [];
   const now = new Date(state.now).getTime();
-  const key = "dash:" + previous.map(eventKey).join(";;") + "::" + upcoming.map(eventKey).join(";;");
+  const key = "dash:" + authStatusKey(state.auth) + "::"
+    + previous.map(eventKey).join(";;") + "::" + upcoming.map(eventKey).join(";;");
   if (key !== lastRendered) {
     let html = '<div class="dashboard">';
+    html += renderAuthBlock(state.auth, now);
     html += '<h1>oh-shit-meeting <span class="status">running</span></h1>';
 
     if (previous.length > 0) {
@@ -903,15 +1155,31 @@ function renderDashboard(state) {
     restoreOpenDetails(openKeys);
     lastRendered = key;
     bindAckButtons();
+    bindReAuthButton();
   } else {
-    // live-update countdowns without collapsing any open accordion
-    const spans = root.querySelectorAll(".countdown");
+    // live-update countdowns without collapsing any open accordion. The auth
+    // countdown lives in #reauthCountdown so we update it separately and skip
+    // it when iterating event countdowns.
+    updateAuthCountdown(state.auth, now);
+    const spans = Array.from(root.querySelectorAll(".countdown")).filter(s => s.id !== "reauthCountdown");
     const all = previous.concat(upcoming);
     all.forEach((e, i) => {
       if (!spans[i]) return;
       const start = new Date(e.startTime);
       spans[i].textContent = fmtDateTime(start) + ' — ' + relPhrase(start.getTime(), now);
     });
+  }
+}
+
+function updateAuthCountdown(auth, nowMs) {
+  const el = document.getElementById("reauthCountdown");
+  if (!el || !auth || !auth.expiresAt) return;
+  const expiresAt = new Date(auth.expiresAt).getTime();
+  const diff = expiresAt - nowMs;
+  if (diff <= 0) {
+    el.textContent = "expired " + fmtDuration(-diff) + " ago";
+  } else {
+    el.textContent = fmtDuration(diff);
   }
 }
 

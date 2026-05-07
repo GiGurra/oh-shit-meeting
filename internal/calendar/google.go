@@ -161,6 +161,12 @@ func TokenAge() time.Duration {
 
 const maxTokenAge = 4 * 24 * time.Hour
 
+// MaxTokenAge is the duration after which a stored token requires a fresh
+// browser re-auth (a Google OAuth client in "testing" status hands out
+// refresh tokens that expire after 7 days; we re-auth a few days earlier
+// to leave headroom).
+func MaxTokenAge() time.Duration { return maxTokenAge }
+
 // ReAuthIfStale checks if the token is older than 4 days and triggers
 // a browser re-auth if so. Returns true if re-auth was performed.
 func ReAuthIfStale() bool {
