@@ -62,11 +62,39 @@ func TestPollEventsPollsAgainWhenRequested(t *testing.T) {
 	awaitPoll(t, polls, 1)
 	pollNow <- struct{}{}
 	awaitPoll(t, polls, 2)
+	awaitEventStoreID(t, store, "2")
 
-	events := store.get()
-	if len(events) != 1 || events[0].ID != "2" {
-		t.Fatalf("event store = %#v, want second poll result", events)
+	close(stop)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("poll loop did not stop")
 	}
+}
+
+func TestPollEventsRequestedPollPreservesScheduledPoll(t *testing.T) {
+	ticks := make(chan time.Time, 1)
+	pollNow := make(chan struct{}, 1)
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	polls := make(chan int, 3)
+	store := &eventStore{}
+	pollCount := 0
+
+	go func() {
+		defer close(done)
+		pollEventsOnTicks(ticks, pollNow, stop, store, func() []calendar.Event {
+			pollCount++
+			polls <- pollCount
+			return nil
+		})
+	}()
+
+	awaitPoll(t, polls, 1)
+	pollNow <- struct{}{}
+	awaitPoll(t, polls, 2)
+	ticks <- time.Now()
+	awaitPoll(t, polls, 3)
 
 	close(stop)
 	select {
@@ -85,5 +113,26 @@ func awaitPoll(t *testing.T, polls <-chan int, want int) {
 		}
 	case <-time.After(time.Second):
 		t.Fatalf("timed out waiting for poll %d", want)
+	}
+}
+
+func awaitEventStoreID(t *testing.T, store *eventStore, wantID string) {
+	t.Helper()
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		events := store.get()
+		if len(events) == 1 && events[0].ID == wantID {
+			return
+		}
+
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			t.Fatalf("event store = %#v, want event ID %q", events, wantID)
+		}
 	}
 }

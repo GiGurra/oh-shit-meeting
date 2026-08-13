@@ -550,28 +550,23 @@ func runLoop(params *Params, store *eventStore, ackStore *ack.FileStore, finder 
 // interval or an explicit refresh request. stop is nil in production; tests
 // use it to terminate the loop cleanly.
 func pollEvents(interval time.Duration, pollNow, stop <-chan struct{}, store *eventStore, poll func() []calendar.Event) {
-	for {
-		store.set(poll())
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	pollEventsOnTicks(ticker.C, pollNow, stop, store, poll)
+}
 
-		timer := time.NewTimer(interval)
+// pollEventsOnTicks performs the initial poll and refreshes for both scheduled
+// ticks and explicit requests without changing the schedule behind ticks.
+func pollEventsOnTicks(ticks <-chan time.Time, pollNow, stop <-chan struct{}, store *eventStore, poll func() []calendar.Event) {
+	store.set(poll())
+	for {
 		select {
-		case <-timer.C:
+		case <-ticks:
 		case <-pollNow:
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
 		case <-stop:
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
 			return
 		}
+		store.set(poll())
 	}
 }
 
