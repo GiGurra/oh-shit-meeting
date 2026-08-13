@@ -1,6 +1,9 @@
 package gui
 
 import (
+	"bytes"
+	"image/color"
+	"image/png"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -141,6 +144,53 @@ func TestSplitEvents_NilIsAckedIsSafe(t *testing.T) {
 	if len(upcoming) != 1 || upcoming[0].Acked {
 		t.Errorf("expected single non-acked event, got %+v", upcoming)
 	}
+}
+
+func TestTrayIconStatesAreDistinct22PixelPNGs(t *testing.T) {
+	states := []trayIconState{trayHealthy, trayAuthAttention, trayAlert, trayAlertAlternate}
+	encoded := make([][]byte, len(states))
+	for i, state := range states {
+		encoded[i] = makeIconPNG(state)
+		img, err := png.Decode(bytes.NewReader(encoded[i]))
+		if err != nil {
+			t.Fatalf("state %d is not a PNG: %v", state, err)
+		}
+		if got := img.Bounds().Size(); got.X != 22 || got.Y != 22 {
+			t.Fatalf("state %d dimensions = %v, want 22x22", state, got)
+		}
+		if _, _, _, alpha := img.At(0, 0).RGBA(); alpha != 0 {
+			t.Errorf("state %d corner is opaque; want transparent padding", state)
+		}
+	}
+
+	for i := range encoded {
+		for j := i + 1; j < len(encoded); j++ {
+			if bytes.Equal(encoded[i], encoded[j]) {
+				t.Errorf("states %d and %d encoded identically", states[i], states[j])
+			}
+		}
+	}
+}
+
+func TestTrayIconGlyphsCarryStateWithoutColor(t *testing.T) {
+	wantAt := func(state trayIconState, x, y int, want color.NRGBA) {
+		t.Helper()
+		img, err := png.Decode(bytes.NewReader(makeIconPNG(state)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := color.NRGBAModel.Convert(img.At(x, y)).(color.NRGBA)
+		if got != want {
+			t.Errorf("state %d pixel (%d,%d) = %#v, want %#v", state, x, y, got, want)
+		}
+	}
+
+	white := color.NRGBA{R: 248, G: 250, B: 252, A: 255}
+	red := color.NRGBA{R: 217, G: 45, B: 32, A: 255}
+	wantAt(trayHealthy, 7, 12, white)        // rising stroke of the check
+	wantAt(trayAuthAttention, 11, 11, white) // round head of the keyhole
+	wantAt(trayAlert, 11, 10, white)         // exclamation stem
+	wantAt(trayAlertAlternate, 11, 10, red)  // inverted exclamation stem
 }
 
 // withStubConfig swaps the package-level cfg for the duration of the test
