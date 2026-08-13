@@ -294,16 +294,19 @@ func run(params *Params) {
 	ack.Cleanup(7 * 24 * time.Hour)
 
 	store := &eventStore{}
+	pollNow := make(chan struct{}, 1)
 	ackStore := &ack.FileStore{}
 	finder := reminder.NewFinder(ackStore, &reminder.RealClock{}, reminder.Config{
 		WarnBefore: params.WarnBefore,
 		Sound:      params.Sound,
 	})
 	if err := gui.Init(gui.Config{
-		Port:          params.Port,
-		EventsFn:      store.get,
-		AuthStatusFn:  buildAuthStatus,
-		ReAuthFn:      reAuth,
+		Port:         params.Port,
+		EventsFn:     store.get,
+		AuthStatusFn: buildAuthStatus,
+		ReAuthFn: func() error {
+			return reAuthAndRequestPoll(reAuth, pollNow)
+		},
 		IsEventAckedFn: func(eventID string, startTime time.Time) bool {
 			return ackStore.IsAcked(reminder.AckEventKey(eventID, startTime), reminder.EventAckID)
 		},
@@ -349,7 +352,7 @@ func run(params *Params) {
 		slog.Error("failed to init dashboard", "error", err)
 		os.Exit(1)
 	}
-	go runLoop(params, store, ackStore, finder)
+	go runLoop(params, store, ackStore, finder, pollNow)
 	gui.Run()
 }
 
@@ -377,6 +380,20 @@ func reAuth() error {
 		return fmt.Errorf("no Google credentials configured — run 'oh-shit-meeting auth --interactive' from a terminal first")
 	}
 	return calendar.ReAuthenticate()
+}
+
+// reAuthAndRequestPoll refreshes calendar events after new credentials have
+// been stored. The buffered, non-blocking signal coalesces repeated requests
+// and lets the existing poll goroutine remain the sole event fetcher.
+func reAuthAndRequestPoll(reAuthenticate func() error, pollNow chan<- struct{}) error {
+	if err := reAuthenticate(); err != nil {
+		return err
+	}
+	select {
+	case pollNow <- struct{}{}:
+	default:
+	}
+	return nil
 }
 
 // findEvent returns the event with the given ID and start time from a slice.
@@ -457,16 +474,13 @@ func (s *eventStore) set(e []calendar.Event) {
 	s.mu.Unlock()
 }
 
-func runLoop(params *Params, store *eventStore, ackStore *ack.FileStore, finder *reminder.Finder) {
+func runLoop(params *Params, store *eventStore, ackStore *ack.FileStore, finder *reminder.Finder, pollNow <-chan struct{}) {
 	// Poll calendar in a separate goroutine so slow/hung API calls
 	// never block the alert check loop.
-	go func() {
-		for {
-			calendar.ReAuthIfStale()
-			store.set(calendar.Poll(params.Backend, params.LookaheadDays))
-			time.Sleep(params.PollInterval)
-		}
-	}()
+	go pollEvents(params.PollInterval, pollNow, nil, store, func() []calendar.Event {
+		calendar.ReAuthIfStale()
+		return calendar.Poll(params.Backend, params.LookaheadDays)
+	})
 
 	// Check for reminders every second, independent of polling.
 	ticker := time.NewTicker(1 * time.Second)
@@ -529,6 +543,30 @@ func runLoop(params *Params, store *eventStore, ackStore *ack.FileStore, finder 
 				}
 			}
 		}
+	}
+}
+
+// pollEvents fetches immediately on startup, then after either the configured
+// interval or an explicit refresh request. stop is nil in production; tests
+// use it to terminate the loop cleanly.
+func pollEvents(interval time.Duration, pollNow, stop <-chan struct{}, store *eventStore, poll func() []calendar.Event) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	pollEventsOnTicks(ticker.C, pollNow, stop, store, poll)
+}
+
+// pollEventsOnTicks performs the initial poll and refreshes for both scheduled
+// ticks and explicit requests without changing the schedule behind ticks.
+func pollEventsOnTicks(ticks <-chan time.Time, pollNow, stop <-chan struct{}, store *eventStore, poll func() []calendar.Event) {
+	store.set(poll())
+	for {
+		select {
+		case <-ticks:
+		case <-pollNow:
+		case <-stop:
+			return
+		}
+		store.set(poll())
 	}
 }
 
