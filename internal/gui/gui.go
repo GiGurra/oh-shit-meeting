@@ -23,16 +23,16 @@ import (
 )
 
 type Config struct {
-	Port             int
-	EventsFn         func() []calendar.Event
-	IsEventAckedFn   func(eventID string, startTime time.Time) bool
-	AckEventFn       func(eventID string, startTime time.Time) error
-	UnackEventFn     func(eventID string, startTime time.Time) error
-	RemindersFn      func(event calendar.Event, startTime time.Time) []Reminder
-	AckReminderFn    func(eventID string, startTime time.Time, reminderID string) error
-	UnackReminderFn  func(eventID string, startTime time.Time, reminderID string) error
+	Port            int
+	EventsFn        func() []calendar.Event
+	IsEventAckedFn  func(eventID string, startTime time.Time) bool
+	AckEventFn      func(eventID string, startTime time.Time) error
+	UnackEventFn    func(eventID string, startTime time.Time) error
+	RemindersFn     func(event calendar.Event, startTime time.Time) []Reminder
+	AckReminderFn   func(eventID string, startTime time.Time, reminderID string) error
+	UnackReminderFn func(eventID string, startTime time.Time, reminderID string) error
 	// AuthStatusFn is called whenever the dashboard or tray needs to know
-	// whether browser auth is current. May be nil (tray stays green).
+	// whether browser auth is current. May be nil (tray stays healthy).
 	AuthStatusFn func() AuthStatus
 	// ReAuthFn triggers the OAuth2 browser flow. May be nil to disable the
 	// re-auth button and tray menu item.
@@ -52,7 +52,7 @@ type AuthStatus struct {
 	MaxAge    time.Duration
 }
 
-// NeedsAttention is true when the tray should pull the yellow icon: there's
+// NeedsAttention is true when the tray should show the auth-attention icon: there's
 // no token at all, or the stored token has aged past ExpiresAt.
 func (s AuthStatus) NeedsAttention() bool {
 	if !s.HasToken {
@@ -100,23 +100,34 @@ type Attendee struct {
 }
 
 var (
-	mu          sync.Mutex
-	active      *ReminderInfo
-	activeDone  chan struct{}
-	cfg         Config
-	greenIcon   []byte
-	redIcon     []byte
-	yellowIcon  []byte
-	alertActive bool // protected by mu; true while an alert is flashing
+	mu           sync.Mutex
+	active       *ReminderInfo
+	activeDone   chan struct{}
+	cfg          Config
+	healthyIcon  []byte
+	authIcon     []byte
+	alertIcon    []byte
+	alertAltIcon []byte
+	alertActive  bool // protected by mu; true while an alert is flashing
+)
+
+type trayIconState uint8
+
+const (
+	trayHealthy trayIconState = iota
+	trayAuthAttention
+	trayAlert
+	trayAlertAlternate
 )
 
 // Init prepares icons and starts the local HTTP server.
 // Safe to call once before Run.
 func Init(c Config) error {
 	cfg = c
-	greenIcon = makeTrayIcon(color.RGBA{R: 30, G: 180, B: 30, A: 255})
-	redIcon = makeTrayIcon(color.RGBA{R: 200, G: 30, B: 30, A: 255})
-	yellowIcon = makeTrayIcon(color.RGBA{R: 230, G: 180, B: 30, A: 255})
+	healthyIcon = makeTrayIcon(trayHealthy)
+	authIcon = makeTrayIcon(trayAuthAttention)
+	alertIcon = makeTrayIcon(trayAlert)
+	alertAltIcon = makeTrayIcon(trayAlertAlternate)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", guardLocal(handleIndex))
@@ -163,7 +174,7 @@ func onReady() {
 	systray.AddSeparator()
 	mQuit := systray.AddMenuItem("Quit", "Quit oh-shit-meeting")
 
-	// Refresh the tray icon periodically so it flips to yellow when stored
+	// Refresh the tray icon periodically so it shows auth attention when stored
 	// auth ages past the threshold without any other event nudging it.
 	go func() {
 		t := time.NewTicker(60 * time.Second)
@@ -192,7 +203,7 @@ func onReady() {
 
 // runReAuth invokes cfg.ReAuthFn off the systray click goroutine so it can
 // block on the browser flow without freezing the menu. Refreshes the tray
-// icon when done so green/yellow reflects the new state.
+// icon when done so healthy/auth-attention reflects the new state.
 func runReAuth(source string) {
 	if cfg.ReAuthFn == nil {
 		slog.Warn("re-auth requested but ReAuthFn not configured", "source", source)
@@ -208,14 +219,14 @@ func runReAuth(source string) {
 }
 
 // currentBaseIcon picks the tray icon that should be shown when no alert
-// is firing. Yellow when auth needs attention, green otherwise.
+// is firing. Amber keyhole when auth needs attention, neutral check otherwise.
 func currentBaseIcon() []byte {
 	if cfg.AuthStatusFn != nil {
 		if cfg.AuthStatusFn().NeedsAttention() {
-			return yellowIcon
+			return authIcon
 		}
 	}
-	return greenIcon
+	return healthyIcon
 }
 
 // refreshBaseIcon updates the tray icon to the base (non-flashing) state if
@@ -268,7 +279,7 @@ func flashTray(done <-chan struct{}) {
 
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
-	red := false
+	alternate := false
 	for {
 		select {
 		case <-done:
@@ -278,12 +289,12 @@ func flashTray(done <-chan struct{}) {
 			systray.SetIcon(currentBaseIcon())
 			return
 		case <-ticker.C:
-			if red {
-				systray.SetIcon(currentBaseIcon())
+			if alternate {
+				systray.SetIcon(alertAltIcon)
 			} else {
-				systray.SetIcon(redIcon)
+				systray.SetIcon(alertIcon)
 			}
-			red = !red
+			alternate = !alternate
 		}
 	}
 }
@@ -346,13 +357,13 @@ type stateDTO struct {
 }
 
 type authDTO struct {
-	HasToken         bool      `json:"hasToken"`
-	HasCredentials   bool      `json:"hasCredentials"`
-	AuthenticatedAt  time.Time `json:"authenticatedAt,omitempty"`
-	ExpiresAt        time.Time `json:"expiresAt,omitempty"`
-	MaxAgeSeconds    int64     `json:"maxAgeSeconds"`
-	NeedsAttention   bool      `json:"needsAttention"`
-	CanReAuth        bool      `json:"canReAuth"`
+	HasToken        bool      `json:"hasToken"`
+	HasCredentials  bool      `json:"hasCredentials"`
+	AuthenticatedAt time.Time `json:"authenticatedAt,omitempty"`
+	ExpiresAt       time.Time `json:"expiresAt,omitempty"`
+	MaxAgeSeconds   int64     `json:"maxAgeSeconds"`
+	NeedsAttention  bool      `json:"needsAttention"`
+	CanReAuth       bool      `json:"canReAuth"`
 }
 
 // guardLocal rejects requests with a non-loopback Host header (blocking
@@ -680,33 +691,108 @@ func openBrowser(url string) error {
 
 // makeTrayIcon returns platform-appropriate icon bytes: ICO on Windows
 // (which Shell_NotifyIcon requires), PNG elsewhere.
-func makeTrayIcon(c color.RGBA) []byte {
-	pngBytes := makeIconPNG(c)
+func makeTrayIcon(state trayIconState) []byte {
+	pngBytes := makeIconPNG(state)
 	if runtime.GOOS == "windows" {
 		return pngToICO(pngBytes, 22)
 	}
 	return pngBytes
 }
 
-func makeIconPNG(c color.RGBA) []byte {
-	size := 22
-	img := image.NewRGBA(image.Rect(0, 0, size, size))
-	center := float64(size) / 2
-	radius := float64(size)/2 - 1
-	for y := 0; y < size; y++ {
-		for x := 0; x < size; x++ {
-			dx := float64(x) - center + 0.5
-			dy := float64(y) - center + 0.5
-			if dx*dx+dy*dy <= radius*radius {
-				img.Set(x, y, c)
-			}
-		}
+func makeIconPNG(state trayIconState) []byte {
+	img := image.NewRGBA(image.Rect(0, 0, 22, 22))
+	white := color.RGBA{R: 248, G: 250, B: 252, A: 255}
+	graphite := color.RGBA{R: 55, G: 65, B: 81, A: 255}
+	amber := color.RGBA{R: 217, G: 154, B: 0, A: 255}
+	red := color.RGBA{R: 217, G: 45, B: 32, A: 255}
+
+	switch state {
+	case trayHealthy:
+		// The light keyline remains visible on a dark tray, while the graphite
+		// fill remains visible on a light tray. The API offers no theme signal.
+		drawCalendar(img, 3, 2, white)
+		fillRect(img, 4, 7, 18, 19, graphite)
+		drawCheck(img, white)
+	case trayAuthAttention:
+		drawCalendar(img, 3, 2, amber)
+		drawKeyhole(img, white)
+	case trayAlert:
+		drawCalendar(img, 3, 2, red)
+		drawExclamation(img, white)
+	case trayAlertAlternate:
+		drawCircle(img, 11, 11, 10, red)
+		drawSmallCalendar(img, white)
+		drawSmallExclamation(img, red)
 	}
+
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, img); err != nil {
 		panic(fmt.Sprintf("failed to encode icon: %v", err))
 	}
 	return buf.Bytes()
+}
+
+func fillRect(img *image.RGBA, x0, y0, x1, y1 int, c color.RGBA) {
+	for y := y0; y < y1; y++ {
+		for x := x0; x < x1; x++ {
+			img.SetRGBA(x, y, c)
+		}
+	}
+}
+
+func drawCalendar(img *image.RGBA, x, y int, c color.RGBA) {
+	fillRect(img, x, y+3, x+16, y+18, c)
+	fillRect(img, x+3, y, x+6, y+6, c)
+	fillRect(img, x+10, y, x+13, y+6, c)
+	// Clip the four body corners to keep the silhouette soft at 22 px.
+	img.SetRGBA(x, y+3, color.RGBA{})
+	img.SetRGBA(x+15, y+3, color.RGBA{})
+	img.SetRGBA(x, y+17, color.RGBA{})
+	img.SetRGBA(x+15, y+17, color.RGBA{})
+}
+
+func drawSmallCalendar(img *image.RGBA, c color.RGBA) {
+	fillRect(img, 6, 7, 16, 17, c)
+	fillRect(img, 8, 5, 10, 9, c)
+	fillRect(img, 12, 5, 14, 9, c)
+	img.SetRGBA(6, 7, color.RGBA{})
+	img.SetRGBA(15, 7, color.RGBA{})
+	img.SetRGBA(6, 16, color.RGBA{})
+	img.SetRGBA(15, 16, color.RGBA{})
+}
+
+func drawCircle(img *image.RGBA, cx, cy, radius int, c color.RGBA) {
+	r2 := radius * radius
+	for y := cy - radius; y <= cy+radius; y++ {
+		for x := cx - radius; x <= cx+radius; x++ {
+			dx, dy := x-cx, y-cy
+			if dx*dx+dy*dy <= r2 {
+				img.SetRGBA(x, y, c)
+			}
+		}
+	}
+}
+
+func drawCheck(img *image.RGBA, c color.RGBA) {
+	fillRect(img, 7, 12, 9, 15, c)
+	fillRect(img, 9, 14, 11, 17, c)
+	fillRect(img, 11, 12, 13, 15, c)
+	fillRect(img, 13, 10, 15, 13, c)
+}
+
+func drawKeyhole(img *image.RGBA, c color.RGBA) {
+	drawCircle(img, 11, 11, 2, c)
+	fillRect(img, 10, 12, 13, 17, c)
+}
+
+func drawExclamation(img *image.RGBA, c color.RGBA) {
+	fillRect(img, 10, 9, 13, 15, c)
+	fillRect(img, 10, 17, 13, 19, c)
+}
+
+func drawSmallExclamation(img *image.RGBA, c color.RGBA) {
+	fillRect(img, 10, 9, 12, 13, c)
+	fillRect(img, 10, 15, 12, 17, c)
 }
 
 // pngToICO wraps a PNG in a single-image ICO container. Windows Vista+
@@ -725,14 +811,14 @@ func pngToICO(pngBytes []byte, size int) []byte {
 	binary.Write(&buf, binary.LittleEndian, uint16(1)) // type = 1 (ICO)
 	binary.Write(&buf, binary.LittleEndian, uint16(1)) // image count
 	// ICONDIRENTRY
-	buf.WriteByte(b)                                            // width
-	buf.WriteByte(b)                                            // height
-	buf.WriteByte(0)                                            // color palette
-	buf.WriteByte(0)                                            // reserved
-	binary.Write(&buf, binary.LittleEndian, uint16(1))          // color planes
-	binary.Write(&buf, binary.LittleEndian, uint16(32))         // bits per pixel
+	buf.WriteByte(b)                                               // width
+	buf.WriteByte(b)                                               // height
+	buf.WriteByte(0)                                               // color palette
+	buf.WriteByte(0)                                               // reserved
+	binary.Write(&buf, binary.LittleEndian, uint16(1))             // color planes
+	binary.Write(&buf, binary.LittleEndian, uint16(32))            // bits per pixel
 	binary.Write(&buf, binary.LittleEndian, uint32(len(pngBytes))) // image size
-	binary.Write(&buf, binary.LittleEndian, uint32(22))         // image offset
+	binary.Write(&buf, binary.LittleEndian, uint32(22))            // image offset
 	buf.Write(pngBytes)
 	return buf.Bytes()
 }

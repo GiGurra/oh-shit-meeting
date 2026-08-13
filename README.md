@@ -9,7 +9,7 @@ A calendar reminder daemon that makes sure you never miss a meeting. Serves a lo
 - **Local dashboard** — `http://127.0.0.1:47448/` shows that the daemon is running and lists upcoming events. Each event is an accordion that expands into description, attendees, Meet link, and "Open in Google Calendar"
 - **Flashing red panic page** — the same dashboard tab flips into a full-viewport alert when a reminder fires; the browser is also auto-opened/focused for good measure
 - **Looping alert sound** — keeps playing until you click ACKNOWLEDGE
-- **Systray icon** — flashes red during active alerts; "Open dashboard" / "Quit" menu. Pure-Go on Windows; gracefully no-ops where no tray host is available (e.g. WSL, some GNOME setups)
+- **Systray icon** — calendar-shaped status at a glance: check when healthy, amber keyhole when auth needs attention, and alternating red alert frames during active alerts; "Open dashboard" / "Quit" menu. Pure-Go on Windows; gracefully no-ops where no tray host is available (e.g. WSL, some GNOME setups)
 - **Google Calendar integration** — native OAuth2 (or `gws`/`gog` CLI as an explicit backend)
 - **Custom reminder support** — respects your calendar's reminder settings (30m, 2h, etc.)
 - **Global fallback reminder** — configurable default reminder for all events
@@ -132,7 +132,7 @@ oh-shit-meeting &; disown
 
 ## How It Works
 
-1. Starts a local HTTP server on `127.0.0.1:<--port>` serving a single-page dashboard; also puts a circle icon in the system tray where one is available
+1. Starts a local HTTP server on `127.0.0.1:<--port>` serving a single-page dashboard; also puts a calendar status icon in the system tray where one is available
 2. Polls Google Calendar in a **background goroutine** every poll interval (with 30s timeout per API call)
 3. Checks reminders **every second** against cached events (never blocked by polling)
 4. For each upcoming event, checks:
@@ -142,7 +142,7 @@ oh-shit-meeting &; disown
    - Creates an ack file at `~/.oh-shit-meeting/<event-id>_<start-time>/<reminder>.acked`
    - Flips the dashboard page into a flashing red panic view (via state polling — any tab open to the dashboard sees it)
    - Opens/focuses the browser so the alert comes to the front
-   - Flashes the tray icon between green and red
+   - Flashes the tray icon between two distinct red alert frames
    - Plays the alert sound on loop
 6. Click ACKNOWLEDGE (the big white button on the panic page) to dismiss
 7. Stale ack files are cleaned up automatically after 7 days
@@ -181,4 +181,3 @@ Then:
 ```bash
 launchctl load ~/Library/LaunchAgents/com.gigurra.oh-shit-meeting.plist
 ```
-
