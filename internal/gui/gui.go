@@ -108,6 +108,7 @@ var (
 	authIcon     []byte
 	alertIcon    []byte
 	alertAltIcon []byte
+	faviconIcon  = makeIconPNG(trayHealthy)
 	alertActive  bool // protected by mu; true while an alert is flashing
 )
 
@@ -131,6 +132,7 @@ func Init(c Config) error {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", guardLocal(handleIndex))
+	mux.HandleFunc("/favicon.png", guardLocal(handleFavicon))
 	mux.HandleFunc("/state", guardLocal(handleState))
 	mux.HandleFunc("/ack", guardLocal(handleAck))
 	mux.HandleFunc("/ack-event", guardLocal(handleEventAck))
@@ -413,6 +415,12 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write([]byte(indexHTML))
+}
+
+func handleFavicon(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	_, _ = w.Write(faviconIcon)
 }
 
 func handleState(w http.ResponseWriter, r *http.Request) {
@@ -830,6 +838,7 @@ const indexHTML = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <title>oh-shit-meeting</title>
+<link rel="icon" type="image/png" href="/favicon.png">
 <style>
   :root { color-scheme: light dark; }
   html { scrollbar-gutter: stable; }

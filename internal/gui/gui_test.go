@@ -6,6 +6,7 @@ import (
 	"image/png"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -200,6 +201,29 @@ func withStubConfig(t *testing.T, c Config) {
 	prev := cfg
 	cfg = c
 	t.Cleanup(func() { cfg = prev })
+}
+
+func TestHandleFavicon_MatchesHealthyTrayIcon(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/favicon.png", nil)
+	w := httptest.NewRecorder()
+
+	handleFavicon(w, req)
+
+	if got := w.Header().Get("Content-Type"); got != "image/png" {
+		t.Fatalf("expected image/png content type, got %q", got)
+	}
+	if !bytes.Equal(w.Body.Bytes(), makeIconPNG(trayHealthy)) {
+		t.Fatal("favicon does not match the healthy tray icon")
+	}
+	if _, err := png.Decode(bytes.NewReader(w.Body.Bytes())); err != nil {
+		t.Fatalf("favicon is not a valid PNG: %v", err)
+	}
+}
+
+func TestIndexHTML_DeclaresFavicon(t *testing.T) {
+	if !strings.Contains(indexHTML, `<link rel="icon" type="image/png" href="/favicon.png">`) {
+		t.Fatal("index HTML does not declare the favicon")
+	}
 }
 
 func TestHandleEventAck_CallsAckFunc(t *testing.T) {
