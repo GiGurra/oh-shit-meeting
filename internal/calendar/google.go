@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/gigurra/oh-shit-meeting/internal/secret"
@@ -44,8 +45,10 @@ func configFilePath() string {
 const keyringClientSecretUser = "google-client-secret"
 
 type appConfig struct {
-	GoogleClientID string `json:"google_client_id,omitempty"`
+	GoogleClientID  string `json:"google_client_id,omitempty"`
 	AuthenticatedAt string `json:"authenticated_at,omitempty"` // RFC3339
+	// Calendars keeps the daemon from requesting a wider scope than the token was granted.
+	Calendars string `json:"calendars,omitempty"`
 }
 
 func loadAppConfig() appConfig {
@@ -70,6 +73,58 @@ func saveAppConfig(cfg appConfig) error {
 	return os.WriteFile(configFilePath(), data, 0644)
 }
 
+// Empty means every calendar in the user's calendar list.
+var selectedCalendars []string
+
+const allCalendars = "all"
+
+// SetCalendars configures which calendars to read from a comma-separated spec.
+// An empty spec falls back to the selection persisted at the last auth.
+func SetCalendars(spec string) {
+	if strings.TrimSpace(spec) == "" {
+		spec = loadAppConfig().Calendars
+	}
+	selectedCalendars = parseCalendarSpec(spec)
+}
+
+// parseCalendarSpec returns nil for a spec containing "all", which reads every calendar.
+func parseCalendarSpec(spec string) []string {
+	var ids []string
+	for _, part := range strings.Split(spec, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if part == allCalendars {
+			return nil
+		}
+		ids = append(ids, part)
+	}
+	return ids
+}
+
+func calendarSpec() string {
+	return strings.Join(selectedCalendars, ",")
+}
+
+// oauthScopes returns the narrowest scopes the current selection needs. Enumerating
+// the user's calendars takes a scope that reading named calendars does not.
+func oauthScopes() []string {
+	if len(selectedCalendars) > 0 {
+		return []string{gcal.CalendarEventsReadonlyScope}
+	}
+	return []string{gcal.CalendarEventsReadonlyScope, gcal.CalendarCalendarlistReadonlyScope}
+}
+
+// calendarLabel names the source calendar for display. "primary" is an alias rather
+// than a name, and resolving a real name would take a wider scope than events-only.
+func calendarLabel(id string) string {
+	if id == "primary" {
+		return ""
+	}
+	return id
+}
+
 // loadCredentials reads the OAuth client credentials JSON and builds an oauth2.Config
 // scoped to read-only calendar access.
 func loadCredentials(credentialsPath string) (*oauth2.Config, error) {
@@ -77,7 +132,7 @@ func loadCredentials(credentialsPath string) (*oauth2.Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read credentials file: %w", err)
 	}
-	cfg, err := google.ConfigFromJSON(data, gcal.CalendarReadonlyScope)
+	cfg, err := google.ConfigFromJSON(data, oauthScopes()...)
 	if err != nil {
 		return nil, fmt.Errorf("parse credentials: %w", err)
 	}
@@ -88,7 +143,7 @@ func oauthConfigFromClientIDSecret(clientID, clientSecret string) *oauth2.Config
 	return &oauth2.Config{
 		ClientID:     clientID,
 		ClientSecret: clientSecret,
-		Scopes:       []string{gcal.CalendarReadonlyScope},
+		Scopes:       oauthScopes(),
 		Endpoint:     google.Endpoint,
 	}
 }
@@ -256,6 +311,7 @@ func ReAuthenticate() error {
 	}
 	cfg := loadAppConfig()
 	cfg.AuthenticatedAt = time.Now().Format(time.RFC3339)
+	cfg.Calendars = calendarSpec()
 	if err := saveAppConfig(cfg); err != nil {
 		slog.Warn("Could not save auth timestamp", "error", err)
 	}
@@ -281,6 +337,7 @@ func Authenticate(credentialsPath string) error {
 	cfg := loadAppConfig()
 	cfg.GoogleClientID = oauthCfg.ClientID
 	cfg.AuthenticatedAt = time.Now().Format(time.RFC3339)
+	cfg.Calendars = calendarSpec()
 	if err := saveAppConfig(cfg); err != nil {
 		slog.Warn("Could not save config", "error", err)
 	}
@@ -304,6 +361,7 @@ func AuthenticateWithClientIDSecret(clientID, clientSecret string) error {
 	cfg := loadAppConfig()
 	cfg.GoogleClientID = clientID
 	cfg.AuthenticatedAt = time.Now().Format(time.RFC3339)
+	cfg.Calendars = calendarSpec()
 	if err := saveAppConfig(cfg); err != nil {
 		slog.Warn("Could not save config", "error", err)
 	}
@@ -462,6 +520,18 @@ func doFetchEventsGoogle(from, to string) ([]Event, error) {
 	svc, err := newGoogleService()
 	if err != nil {
 		return nil, err
+	}
+
+	if len(selectedCalendars) > 0 {
+		var allEvents []Event
+		for _, id := range selectedCalendars {
+			events, err := fetchGoogleCalendarEvents(svc, id, calendarLabel(id), from, to)
+			if err != nil {
+				return nil, fmt.Errorf("fetch events for calendar %q: %w", id, err)
+			}
+			allEvents = append(allEvents, events...)
+		}
+		return allEvents, nil
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), apiTimeout)

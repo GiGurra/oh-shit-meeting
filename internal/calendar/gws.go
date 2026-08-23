@@ -78,9 +78,13 @@ func gwsFetchEventsForCalendar(calendarID, from, to string) ([]Event, error) {
 }
 
 func fetchEventsGWS(from, to string) ([]Event, error) {
-	calendarIDs, err := gwsListCalendars()
-	if err != nil {
-		return nil, err
+	calendarIDs := selectedCalendars
+	if len(calendarIDs) == 0 {
+		var err error
+		calendarIDs, err = gwsListCalendars()
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	var allEvents []Event
