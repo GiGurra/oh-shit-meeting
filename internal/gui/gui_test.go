@@ -258,6 +258,22 @@ func TestHandleIndex_NonDashboardPathDoesNotRequestCalendarRefresh(t *testing.T)
 	}
 }
 
+func TestHandleState_DoesNotRequestCalendarRefresh(t *testing.T) {
+	called := false
+	withStubConfig(t, Config{RefreshFn: func() { called = true }})
+	req := httptest.NewRequest(http.MethodGet, "/state", nil)
+	w := httptest.NewRecorder()
+
+	handleState(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if called {
+		t.Fatal("automatic state polling unexpectedly requested a calendar refresh")
+	}
+}
+
 func TestHandleEventAck_CallsAckFunc(t *testing.T) {
 	var gotID string
 	var gotStart time.Time
