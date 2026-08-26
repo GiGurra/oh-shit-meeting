@@ -33,14 +33,15 @@ type CommonParams struct {
 
 type Params struct {
 	CommonParams
-	PollInterval time.Duration `descr:"How often to poll Google Calendar for events" default:"5m"`
-	WarnBefore   time.Duration `descr:"Global alert time before meeting" default:"5m"`
-	Sound        string        `descr:"Alert sound (none, or system sound name like Glass, Hero, Funk)" default:"Hero"`
-	Fullscreen   bool          `descr:"Show alerts in fullscreen mode for maximum obnoxiousness" default:"false"`
-	Backend       string        `descr:"Calendar backend to use" default:"auto" alts:"auto,google,gws,gog"`
-	LookaheadDays int           `descr:"How many days ahead to look for events" default:"3"`
-	Port          int           `descr:"Port for the local dashboard HTTP server" default:"47448"`
-	DisplayTestAlert bool       `descr:"Fire a synthetic alert and exit when acknowledged (for testing)" default:"false"`
+	PollInterval     time.Duration `descr:"How often to poll Google Calendar for events" default:"5m"`
+	WarnBefore       time.Duration `descr:"Global alert time before meeting" default:"5m"`
+	Sound            string        `descr:"Alert sound (none, or system sound name like Glass, Hero, Funk)" default:"Hero"`
+	Fullscreen       bool          `descr:"Show alerts in fullscreen mode for maximum obnoxiousness" default:"false"`
+	Backend          string        `descr:"Calendar backend to use" default:"auto" alts:"auto,google,gws,gog"`
+	LookaheadDays    int           `descr:"How many days ahead to look for events" default:"3"`
+	Port             int           `descr:"Port for the local dashboard HTTP server" default:"47448"`
+	DisplayTestAlert bool          `descr:"Fire a synthetic alert and exit when acknowledged (for testing)" default:"false"`
+	Calendar         string        `descr:"Comma-separated calendar IDs to read ('primary' for your own, 'all' for every subscribed calendar). Defaults to the selection from the last auth" default:""`
 }
 
 type ListEventsParams struct {
@@ -48,12 +49,14 @@ type ListEventsParams struct {
 	Backend       string `descr:"Calendar backend to use" default:"auto" alts:"auto,google,gws,gog"`
 	Json          bool   `descr:"Output as JSON" default:"false"`
 	LookaheadDays int    `descr:"How many days ahead to look for events" default:"3"`
+	Calendar      string `descr:"Comma-separated calendar IDs to read ('primary' for your own, 'all' for every subscribed calendar). Defaults to the selection from the last auth" default:""`
 }
 
 type AuthParams struct {
 	CommonParams
 	Credentials string `optional:"true" descr:"Path to Google OAuth client credentials JSON from GCP console"`
 	Interactive bool   `short:"i" descr:"Enter client ID and secret interactively" default:"false"`
+	Calendar    string `descr:"Comma-separated calendar IDs to read ('primary' for your own, 'all' for every subscribed calendar). Defaults to the selection from the last auth" default:""`
 }
 
 type StatusParams struct {
@@ -91,6 +94,7 @@ func main() {
 		Version: getVersion(),
 		RunFunc: func(params *Params, cmd *cobra.Command, args []string) {
 			secret.AcceptInsecure(params.AcceptInsecureSecretStorage)
+			calendar.SetCalendars(params.Calendar)
 			run(params)
 		},
 		SubCmds: boa.SubCmds(
@@ -114,6 +118,7 @@ To get a credentials file:
   4. Download the JSON file`,
 				RunFunc: func(params *AuthParams, cmd *cobra.Command, args []string) {
 					secret.AcceptInsecure(params.AcceptInsecureSecretStorage)
+					calendar.SetCalendars(params.Calendar)
 					if params.Interactive {
 						clientID, clientSecret := readClientCredentials()
 						if err := calendar.AuthenticateWithClientIDSecret(clientID, clientSecret); err != nil {
@@ -219,6 +224,7 @@ To get a credentials file:
 				Short: "List upcoming calendar events (live integration test)",
 				RunFunc: func(params *ListEventsParams, cmd *cobra.Command, args []string) {
 					secret.AcceptInsecure(params.AcceptInsecureSecretStorage)
+					calendar.SetCalendars(params.Calendar)
 					calendar.ReAuthIfStale()
 					events := calendar.Poll(params.Backend, params.LookaheadDays)
 					if len(events) == 0 {

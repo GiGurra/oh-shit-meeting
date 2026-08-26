@@ -47,6 +47,8 @@ To get credentials:
 3. Enable the [Google Calendar API](https://console.cloud.google.com/apis/library/calendar-json.googleapis.com)
 4. Download the JSON file, or copy the client ID and secret
 
+By default the daemon reads every calendar in your calendar list, which includes team, room and holiday calendars. `--calendar` limits it to the calendars you name. The requested OAuth scope follows that selection: `calendar.events.readonly` alone when a selection is set, plus `calendar.calendarlist.readonly` when reading all calendars.
+
 All secrets (OAuth token, client secret) are stored securely in your system keychain (macOS Keychain, GNOME Keyring, or Windows Credential Manager) by default. You only need to authenticate once — re-running `oh-shit-meeting auth` reuses stored credentials.
 
 If you're running somewhere without a working keychain (common on WSL without `gnome-keyring`, or minimal Docker images), pass `--accept-insecure-secret-storage` to opt into a plaintext JSON fallback at `~/.config/oh-shit-meeting/secrets.json` (mode `0600`). The fallback only kicks in when the keychain is actually unavailable; as soon as the keychain starts working again, the next `auth`/`Set` clears the stale plaintext entry.
@@ -101,6 +103,10 @@ oh-shit-meeting --fullscreen
 # Force a specific backend
 oh-shit-meeting --backend=gog
 
+# Read only your own calendar, not every calendar you subscribe to
+oh-shit-meeting auth --calendar=primary --credentials /path/to/credentials.json
+oh-shit-meeting --calendar=primary
+
 # Run somewhere without a working keychain (e.g. WSL)
 oh-shit-meeting --accept-insecure-secret-storage
 
@@ -126,6 +132,7 @@ oh-shit-meeting &; disown
 | `--sound` | `Hero` | Alert sound (macOS: Glass, Hero, Funk, etc. or `none`) |
 | `--backend` | `auto` | Calendar backend: `auto`, `google`, `gws`, or `gog` |
 | `--lookahead-days` | `3` | How many days ahead to look for events |
+| `--calendar` | last auth's selection | Comma-separated calendar IDs to read (`primary` for your own, `all` for every subscribed calendar). Also narrows the OAuth scope, so pass it to `auth` too. Honoured by the `google` and `gws` backends |
 | `--port` | `47448` | Port for the local dashboard HTTP server (4SHIT on a phone keypad) |
 | `--display-test-alert` | `false` | Fire a synthetic alert and exit when acknowledged |
 | `--accept-insecure-secret-storage` | `false` | Allow plaintext JSON fallback when the system keychain is unavailable (available on every subcommand) |
