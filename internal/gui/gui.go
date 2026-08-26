@@ -23,8 +23,13 @@ import (
 )
 
 type Config struct {
-	Port            int
-	EventsFn        func() []calendar.Event
+	Port     int
+	EventsFn func() []calendar.Event
+
+	// RefreshFn requests a fresh calendar poll. It is called when the user
+	// loads or reloads the dashboard document and must not block the HTTP
+	// handler. May be nil when no calendar backend is configured.
+	RefreshFn       func()
 	IsEventAckedFn  func(eventID string, startTime time.Time) bool
 	AckEventFn      func(eventID string, startTime time.Time) error
 	UnackEventFn    func(eventID string, startTime time.Time) error
@@ -412,6 +417,9 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
 		return
+	}
+	if r.Method == http.MethodGet && cfg.RefreshFn != nil {
+		cfg.RefreshFn()
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write([]byte(indexHTML))

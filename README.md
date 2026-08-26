@@ -133,7 +133,7 @@ oh-shit-meeting &; disown
 ## How It Works
 
 1. Starts a local HTTP server on `127.0.0.1:<--port>` serving a single-page dashboard; also puts a calendar status icon in the system tray where one is available
-2. Polls Google Calendar in a **background goroutine** every poll interval (with 30s timeout per API call)
+2. Polls Google Calendar in a **background goroutine** every poll interval (with 30s timeout per API call), and requests an immediate poll whenever the dashboard is loaded or refreshed
 3. Checks reminders **every second** against cached events (never blocked by polling)
 4. For each upcoming event, checks:
    - Custom reminder overrides (popup reminders only)
