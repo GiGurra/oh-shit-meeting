@@ -303,6 +303,9 @@ func run(params *Params) {
 	if err := gui.Init(gui.Config{
 		Port:         params.Port,
 		EventsFn:     store.get,
+		RefreshFn: func() {
+			requestPoll(pollNow)
+		},
 		AuthStatusFn: buildAuthStatus,
 		ReAuthFn: func() error {
 			return reAuthAndRequestPoll(reAuth, pollNow)
@@ -389,11 +392,17 @@ func reAuthAndRequestPoll(reAuthenticate func() error, pollNow chan<- struct{}) 
 	if err := reAuthenticate(); err != nil {
 		return err
 	}
+	requestPoll(pollNow)
+	return nil
+}
+
+// requestPoll sends a buffered, non-blocking signal so repeated dashboard
+// reloads coalesce while the calendar poller is busy.
+func requestPoll(pollNow chan<- struct{}) {
 	select {
 	case pollNow <- struct{}{}:
 	default:
 	}
-	return nil
 }
 
 // findEvent returns the event with the given ID and start time from a slice.

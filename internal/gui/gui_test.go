@@ -226,6 +226,54 @@ func TestIndexHTML_DeclaresFavicon(t *testing.T) {
 	}
 }
 
+func TestHandleIndex_RequestsCalendarRefresh(t *testing.T) {
+	called := false
+	withStubConfig(t, Config{RefreshFn: func() { called = true }})
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+
+	handleIndex(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if !called {
+		t.Fatal("expected loading the dashboard to request a calendar refresh")
+	}
+}
+
+func TestHandleIndex_NonDashboardPathDoesNotRequestCalendarRefresh(t *testing.T) {
+	called := false
+	withStubConfig(t, Config{RefreshFn: func() { called = true }})
+	req := httptest.NewRequest(http.MethodGet, "/missing", nil)
+	w := httptest.NewRecorder()
+
+	handleIndex(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+	if called {
+		t.Fatal("unexpected calendar refresh for a missing page")
+	}
+}
+
+func TestHandleState_DoesNotRequestCalendarRefresh(t *testing.T) {
+	called := false
+	withStubConfig(t, Config{RefreshFn: func() { called = true }})
+	req := httptest.NewRequest(http.MethodGet, "/state", nil)
+	w := httptest.NewRecorder()
+
+	handleState(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if called {
+		t.Fatal("automatic state polling unexpectedly requested a calendar refresh")
+	}
+}
+
 func TestHandleEventAck_CallsAckFunc(t *testing.T) {
 	var gotID string
 	var gotStart time.Time

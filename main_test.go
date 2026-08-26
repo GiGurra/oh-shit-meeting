@@ -39,6 +39,17 @@ func TestReAuthAndRequestPollDoesNotRequestPollAfterFailure(t *testing.T) {
 	}
 }
 
+func TestRequestPollCoalescesRepeatedRequests(t *testing.T) {
+	pollNow := make(chan struct{}, 1)
+
+	requestPoll(pollNow)
+	requestPoll(pollNow)
+
+	if got := len(pollNow); got != 1 {
+		t.Fatalf("queued poll requests = %d, want 1", got)
+	}
+}
+
 func TestPollEventsPollsAgainWhenRequested(t *testing.T) {
 	pollNow := make(chan struct{}, 1)
 	stop := make(chan struct{})
