@@ -9,7 +9,7 @@ import (
 )
 
 func TestReAuthAndRequestPollRequestsPollAfterSuccess(t *testing.T) {
-	pollNow := make(chan struct{}, 1)
+	pollNow := make(chan string, 1)
 
 	err := reAuthAndRequestPoll(func() error { return nil }, pollNow)
 	if err != nil {
@@ -24,7 +24,7 @@ func TestReAuthAndRequestPollRequestsPollAfterSuccess(t *testing.T) {
 }
 
 func TestReAuthAndRequestPollDoesNotRequestPollAfterFailure(t *testing.T) {
-	pollNow := make(chan struct{}, 1)
+	pollNow := make(chan string, 1)
 	wantErr := errors.New("re-auth failed")
 
 	err := reAuthAndRequestPoll(func() error { return wantErr }, pollNow)
@@ -40,10 +40,10 @@ func TestReAuthAndRequestPollDoesNotRequestPollAfterFailure(t *testing.T) {
 }
 
 func TestRequestPollCoalescesRepeatedRequests(t *testing.T) {
-	pollNow := make(chan struct{}, 1)
+	pollNow := make(chan string, 1)
 
-	requestPoll(pollNow)
-	requestPoll(pollNow)
+	requestPoll(pollNow, "manual refresh")
+	requestPoll(pollNow, "manual refresh")
 
 	if got := len(pollNow); got != 1 {
 		t.Fatalf("queued poll requests = %d, want 1", got)
@@ -51,7 +51,7 @@ func TestRequestPollCoalescesRepeatedRequests(t *testing.T) {
 }
 
 func TestPollEventsPollsAgainWhenRequested(t *testing.T) {
-	pollNow := make(chan struct{}, 1)
+	pollNow := make(chan string, 1)
 	stop := make(chan struct{})
 	done := make(chan struct{})
 	polls := make(chan int, 2)
@@ -60,18 +60,18 @@ func TestPollEventsPollsAgainWhenRequested(t *testing.T) {
 
 	go func() {
 		defer close(done)
-		pollEvents(time.Hour, pollNow, stop, store, func() []calendar.Event {
+		pollEvents(time.Hour, pollNow, stop, store, func() calendar.PollResult {
 			pollCount++
 			polls <- pollCount
 			if pollCount == 1 {
-				return []calendar.Event{{ID: "1"}}
+				return calendar.PollResult{Events: []calendar.Event{{ID: "1"}}}
 			}
-			return []calendar.Event{{ID: "2"}}
+			return calendar.PollResult{Events: []calendar.Event{{ID: "2"}}}
 		})
 	}()
 
 	awaitPoll(t, polls, 1)
-	pollNow <- struct{}{}
+	pollNow <- "manual refresh"
 	awaitPoll(t, polls, 2)
 	awaitEventStoreID(t, store, "2")
 
@@ -85,7 +85,7 @@ func TestPollEventsPollsAgainWhenRequested(t *testing.T) {
 
 func TestPollEventsRequestedPollPreservesScheduledPoll(t *testing.T) {
 	ticks := make(chan time.Time, 1)
-	pollNow := make(chan struct{}, 1)
+	pollNow := make(chan string, 1)
 	stop := make(chan struct{})
 	done := make(chan struct{})
 	polls := make(chan int, 3)
@@ -94,15 +94,15 @@ func TestPollEventsRequestedPollPreservesScheduledPoll(t *testing.T) {
 
 	go func() {
 		defer close(done)
-		pollEventsOnTicks(ticks, pollNow, stop, store, func() []calendar.Event {
+		pollEventsOnTicks(ticks, pollNow, stop, store, func() calendar.PollResult {
 			pollCount++
 			polls <- pollCount
-			return nil
+			return calendar.PollResult{}
 		})
 	}()
 
 	awaitPoll(t, polls, 1)
-	pollNow <- struct{}{}
+	pollNow <- "manual refresh"
 	awaitPoll(t, polls, 2)
 	ticks <- time.Now()
 	awaitPoll(t, polls, 3)
@@ -146,4 +146,69 @@ func awaitEventStoreID(t *testing.T, store *eventStore, wantID string) {
 			t.Fatalf("event store = %#v, want event ID %q", events, wantID)
 		}
 	}
+}
+
+func TestFetchStatusPreservesSnapshotOnFailureAndClearsOnEmptySuccess(t *testing.T) {
+	store := &eventStore{}
+	completed := time.Now()
+	store.poll("startup", func() calendar.PollResult {
+		return calendar.PollResult{Events: []calendar.Event{{ID: "saved"}}, CompletedAt: completed}
+	})
+	for _, partial := range []bool{false, true} {
+		store.poll("after re-auth", func() calendar.PollResult {
+			status := store.fetchStatus()
+			if status.State != "fetching" || status.Reason != "after re-auth" || !status.LastSuccessAt.Equal(completed) {
+				t.Fatalf("in-flight status = %+v", status)
+			}
+			result := calendar.PollResult{Error: "offline", CompletedAt: time.Now()}
+			if partial {
+				result.Calendars = []calendar.CalendarResult{{Name: "Work"}, {Name: "Team", Error: "offline"}}
+			}
+			return result
+		})
+		want := "failed"
+		if partial {
+			want = "partial"
+		}
+		status := store.fetchStatus()
+		if status.State != want || !status.LastSuccessAt.Equal(completed) || store.get()[0].ID != "saved" {
+			t.Fatalf("failure status = %+v", status)
+		}
+	}
+	store.poll("manual refresh", func() calendar.PollResult { return calendar.PollResult{CompletedAt: completed.Add(time.Second)} })
+	if len(store.get()) != 0 || store.fetchStatus().State != "success" || !store.fetchStatus().LastSuccessAt.Equal(completed.Add(time.Second)) {
+		t.Fatal("empty success must replace previous data and advance last success")
+	}
+}
+
+func TestReAuthDrivesCompletedFetch(t *testing.T) {
+	pollNow := make(chan string, 1)
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	store := &eventStore{}
+	calls := make(chan int, 2)
+	n := 0
+	go func() {
+		defer close(done)
+		pollEvents(time.Hour, pollNow, stop, store, func() calendar.PollResult {
+			n++
+			calls <- n
+			return calendar.PollResult{Events: []calendar.Event{{ID: "fresh"}}, CompletedAt: time.Now()}
+		})
+	}()
+	defer func() { close(stop); <-done }()
+	awaitPoll(t, calls, 1)
+	if err := reAuthAndRequestPoll(func() error { return nil }, pollNow); err != nil {
+		t.Fatal(err)
+	}
+	awaitPoll(t, calls, 2)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		status := store.fetchStatus()
+		if status.Reason == "after re-auth" && status.State == "success" && !status.LastSuccessAt.IsZero() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("re-auth fetch did not complete: %+v", store.fetchStatus())
 }

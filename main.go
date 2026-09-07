@@ -14,13 +14,13 @@ import (
 	"time"
 
 	"github.com/GiGurra/boa/pkg/boa"
-	"github.com/gofrs/flock"
 	"github.com/gigurra/oh-shit-meeting/internal/ack"
 	"github.com/gigurra/oh-shit-meeting/internal/calendar"
 	"github.com/gigurra/oh-shit-meeting/internal/format"
 	"github.com/gigurra/oh-shit-meeting/internal/gui"
 	"github.com/gigurra/oh-shit-meeting/internal/reminder"
 	"github.com/gigurra/oh-shit-meeting/internal/secret"
+	"github.com/gofrs/flock"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -300,19 +300,20 @@ func run(params *Params) {
 	ack.Cleanup(7 * 24 * time.Hour)
 
 	store := &eventStore{}
-	pollNow := make(chan struct{}, 1)
+	pollNow := make(chan string, 1)
 	ackStore := &ack.FileStore{}
 	finder := reminder.NewFinder(ackStore, &reminder.RealClock{}, reminder.Config{
 		WarnBefore: params.WarnBefore,
 		Sound:      params.Sound,
 	})
 	if err := gui.Init(gui.Config{
-		Port:         params.Port,
-		EventsFn:     store.get,
+		Port:     params.Port,
+		EventsFn: store.get,
 		RefreshFn: func() {
-			requestPoll(pollNow)
+			requestPoll(pollNow, "manual refresh")
 		},
-		AuthStatusFn: buildAuthStatus,
+		AuthStatusFn:  buildAuthStatus,
+		FetchStatusFn: store.fetchStatus,
 		ReAuthFn: func() error {
 			return reAuthAndRequestPoll(reAuth, pollNow)
 		},
@@ -394,19 +395,19 @@ func reAuth() error {
 // reAuthAndRequestPoll refreshes calendar events after new credentials have
 // been stored. The buffered, non-blocking signal coalesces repeated requests
 // and lets the existing poll goroutine remain the sole event fetcher.
-func reAuthAndRequestPoll(reAuthenticate func() error, pollNow chan<- struct{}) error {
+func reAuthAndRequestPoll(reAuthenticate func() error, pollNow chan<- string) error {
 	if err := reAuthenticate(); err != nil {
 		return err
 	}
-	requestPoll(pollNow)
+	requestPoll(pollNow, "after re-auth")
 	return nil
 }
 
 // requestPoll sends a buffered, non-blocking signal so repeated dashboard
 // reloads coalesce while the calendar poller is busy.
-func requestPoll(pollNow chan<- struct{}) {
+func requestPoll(pollNow chan<- string, reason string) {
 	select {
-	case pollNow <- struct{}{}:
+	case pollNow <- reason:
 	default:
 	}
 }
@@ -455,8 +456,8 @@ func runTestAlert(params *Params) {
 				"<p>The real alert renders the event description here — sanitized against an allowlist so tags like <a href=\"https://example.com\">safe links</a>, <i>italics</i>, and lists work, but <code>&lt;script&gt;</code> and event handlers are stripped.</p>" +
 				"<ul><li>Attendees below</li><li>Join Meet button above</li><li>Open in Google Calendar link at the bottom</li></ul>" +
 				"<p>Acknowledge to exit.</p>",
-			HangoutLink:   "https://meet.google.com/test-test-test",
-			HtmlLink:      "https://calendar.google.com/",
+			HangoutLink: "https://meet.google.com/test-test-test",
+			HtmlLink:    "https://calendar.google.com/",
 			Attendees: []gui.Attendee{
 				{DisplayName: "You", Email: "you@example.com", ResponseStatus: "accepted", Self: true},
 				{DisplayName: "A colleague", Email: "colleague@example.com", ResponseStatus: "accepted"},
@@ -475,6 +476,7 @@ func runTestAlert(params *Params) {
 type eventStore struct {
 	mu     sync.RWMutex
 	events []calendar.Event
+	fetch  gui.FetchStatus
 }
 
 func (s *eventStore) get() []calendar.Event {
@@ -483,18 +485,43 @@ func (s *eventStore) get() []calendar.Event {
 	return s.events
 }
 
-func (s *eventStore) set(e []calendar.Event) {
-	s.mu.Lock()
-	s.events = e
-	s.mu.Unlock()
+func (s *eventStore) fetchStatus() gui.FetchStatus {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.fetch
 }
 
-func runLoop(params *Params, store *eventStore, ackStore *ack.FileStore, finder *reminder.Finder, pollNow <-chan struct{}) {
+func (s *eventStore) poll(reason string, poll func() calendar.PollResult) {
+	s.mu.Lock()
+	s.fetch = gui.FetchStatus{State: "fetching", Reason: reason, LastSuccessAt: s.fetch.LastSuccessAt,
+		PollResult: calendar.PollResult{StartedAt: time.Now()}}
+	s.mu.Unlock()
+	result := poll()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.fetch.PollResult = result
+	s.fetch.State = "success"
+	if result.Error != "" {
+		s.fetch.State = "failed"
+		for _, cal := range result.Calendars {
+			if cal.Error == "" {
+				s.fetch.State = "partial"
+				break
+			}
+		}
+		// Preserve the last complete snapshot, including on partial failures.
+		return
+	}
+	s.events = result.Events
+	s.fetch.LastSuccessAt = result.CompletedAt
+}
+
+func runLoop(params *Params, store *eventStore, ackStore *ack.FileStore, finder *reminder.Finder, pollNow <-chan string) {
 	// Poll calendar in a separate goroutine so slow/hung API calls
 	// never block the alert check loop.
-	go pollEvents(params.PollInterval, pollNow, nil, store, func() []calendar.Event {
+	go pollEvents(params.PollInterval, pollNow, nil, store, func() calendar.PollResult {
 		calendar.ReAuthIfStale()
-		return calendar.Poll(params.Backend, params.LookaheadDays)
+		return calendar.PollWithResult(params.Backend, params.LookaheadDays)
 	})
 
 	// Check for reminders every second, independent of polling.
@@ -564,7 +591,7 @@ func runLoop(params *Params, store *eventStore, ackStore *ack.FileStore, finder 
 // pollEvents fetches immediately on startup, then after either the configured
 // interval or an explicit refresh request. stop is nil in production; tests
 // use it to terminate the loop cleanly.
-func pollEvents(interval time.Duration, pollNow, stop <-chan struct{}, store *eventStore, poll func() []calendar.Event) {
+func pollEvents(interval time.Duration, pollNow <-chan string, stop <-chan struct{}, store *eventStore, poll func() calendar.PollResult) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	pollEventsOnTicks(ticker.C, pollNow, stop, store, poll)
@@ -572,16 +599,17 @@ func pollEvents(interval time.Duration, pollNow, stop <-chan struct{}, store *ev
 
 // pollEventsOnTicks performs the initial poll and refreshes for both scheduled
 // ticks and explicit requests without changing the schedule behind ticks.
-func pollEventsOnTicks(ticks <-chan time.Time, pollNow, stop <-chan struct{}, store *eventStore, poll func() []calendar.Event) {
-	store.set(poll())
+func pollEventsOnTicks(ticks <-chan time.Time, pollNow <-chan string, stop <-chan struct{}, store *eventStore, poll func() calendar.PollResult) {
+	store.poll("startup", poll)
 	for {
+		reason := "scheduled refresh"
 		select {
 		case <-ticks:
-		case <-pollNow:
+		case reason = <-pollNow:
 		case <-stop:
 			return
 		}
-		store.set(poll())
+		store.poll(reason, poll)
 	}
 }
 

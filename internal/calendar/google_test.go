@@ -1,6 +1,9 @@
 package calendar
 
 import (
+	"errors"
+	"fmt"
+	"google.golang.org/api/googleapi"
 	"slices"
 	"testing"
 
@@ -50,5 +53,18 @@ func TestCalendarLabel(t *testing.T) {
 	}
 	if got := calendarLabel("team@example.com"); got != "team@example.com" {
 		t.Errorf("calendarLabel = %q", got)
+	}
+}
+
+func TestIsUnauthorizedFinds401AmongCalendarFailures(t *testing.T) {
+	err := errors.Join(
+		fmt.Errorf("team: %w", &googleapi.Error{Code: 503}),
+		fmt.Errorf("work: %w", &googleapi.Error{Code: 401}),
+	)
+	if !isUnauthorized(err) {
+		t.Fatal("401 in later calendar failure must trigger re-auth")
+	}
+	if isUnauthorized(errors.Join(errors.New("offline"), &googleapi.Error{Code: 503})) {
+		t.Fatal("non-auth failure must not trigger re-auth")
 	}
 }

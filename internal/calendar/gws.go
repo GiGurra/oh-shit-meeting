@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os/exec"
 	"time"
 )
@@ -77,7 +76,7 @@ func gwsFetchEventsForCalendar(calendarID, from, to string) ([]Event, error) {
 	return response.Items, nil
 }
 
-func fetchEventsGWS(from, to string) ([]Event, error) {
+func fetchEventsGWS(from, to string, result *PollResult) ([]Event, error) {
 	calendarIDs := selectedCalendars
 	if len(calendarIDs) == 0 {
 		var err error
@@ -87,15 +86,7 @@ func fetchEventsGWS(from, to string) ([]Event, error) {
 		}
 	}
 
-	var allEvents []Event
-	for _, id := range calendarIDs {
-		events, err := gwsFetchEventsForCalendar(id, from, to)
-		if err != nil {
-			slog.Warn("Failed to fetch events for calendar, skipping", "calendarID", id, "error", err)
-			continue
-		}
-		allEvents = append(allEvents, events...)
-	}
-
-	return allEvents, nil
+	return collectCalendars(calendarIDs, func(i int) ([]Event, error) {
+		return gwsFetchEventsForCalendar(calendarIDs[i], from, to)
+	}, result)
 }

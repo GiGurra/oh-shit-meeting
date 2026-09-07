@@ -1,6 +1,7 @@
 package calendar
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -71,26 +72,69 @@ type ReminderOverride struct {
 	Minutes int    `json:"minutes"`
 }
 
+// CalendarResult describes a completed request, including empty calendars.
+type CalendarResult struct {
+	Name     string `json:"name"`
+	Received int    `json:"received"`
+	Error    string `json:"error,omitempty"`
+}
+
+// PollResult records one backend fetch attempt. Events and counts may be partial
+// when Error is nonempty; callers must not treat them as a complete snapshot.
+type PollResult struct {
+	Events      []Event          `json:"-"`
+	StartedAt   time.Time        `json:"startedAt"`
+	CompletedAt time.Time        `json:"completedAt"`
+	Backend     string           `json:"backend"`
+	From        string           `json:"from"`
+	To          string           `json:"to"`
+	Received    int              `json:"received"`
+	Included    int              `json:"included"`
+	Calendars   []CalendarResult `json:"calendars,omitempty"`
+	Error       string           `json:"error,omitempty"`
+}
+
 // FetchEvents returns events and the name of the backend that was used.
 func FetchEvents(from, to, backend string) ([]Event, string, error) {
+	return fetchEvents(from, to, backend, &PollResult{})
+}
+
+func fetchEvents(from, to, backend string, result *PollResult) ([]Event, string, error) {
 	switch backend {
 	case "google":
-		events, err := fetchEventsGoogle(from, to)
+		events, err := fetchEventsGoogle(from, to, result)
 		return events, "gcal-native", err
 	case "gws":
-		events, err := fetchEventsGWS(from, to)
+		events, err := fetchEventsGWS(from, to, result)
 		return events, "gws", err
 	case "gog":
 		events, err := fetchEventsGog(from, to)
 		return events, "gogcli", err
-	default: // "auto" or empty
-		// Use native Google API if authenticated
+	default:
 		if HasGoogleToken() && HasGoogleCredentials() {
-			events, err := fetchEventsGoogle(from, to)
+			events, err := fetchEventsGoogle(from, to, result)
 			return events, "gcal-native", err
 		}
 		return nil, "", fmt.Errorf("no calendar backend available — run 'oh-shit-meeting auth --credentials <file>'")
 	}
+}
+
+// collectCalendars keeps failures visible even when other calendars succeed.
+func collectCalendars(names []string, fetch func(int) ([]Event, error), result *PollResult) ([]Event, error) {
+	var events []Event
+	var failures []error
+	for i, name := range names {
+		items, err := fetch(i)
+		entry := CalendarResult{Name: name, Received: len(items)}
+		if err != nil {
+			entry.Error = err.Error()
+			failures = append(failures, fmt.Errorf("calendar %q: %w", name, err))
+		} else {
+			events = append(events, items...)
+		}
+		result.Calendars = append(result.Calendars, entry)
+	}
+	return events, errors.Join(failures...)
 }
 
 // LookbackStart returns the earlier of (now - minLookback) and the start of
@@ -109,6 +153,15 @@ func LookbackStart(now time.Time, minLookback time.Duration) time.Time {
 // Poll fetches events from Google Calendar and returns valid events only.
 // lookaheadDays controls how far ahead to look (0 defaults to 3 days).
 func Poll(backend string, lookaheadDays int) []Event {
+	return PollWithResult(backend, lookaheadDays).Events
+}
+
+// PollWithResult returns timing, coverage and errors alongside filtered events.
+func PollWithResult(backend string, lookaheadDays int) PollResult {
+	return pollWithFetcher(backend, lookaheadDays, fetchEvents)
+}
+
+func pollWithFetcher(backend string, lookaheadDays int, fetch func(string, string, string, *PollResult) ([]Event, string, error)) PollResult {
 	if lookaheadDays <= 0 {
 		lookaheadDays = 3
 	}
@@ -116,10 +169,13 @@ func Poll(backend string, lookaheadDays int) []Event {
 	from := LookbackStart(now, 1*time.Hour).Format(time.RFC3339)
 	to := now.Add(time.Duration(lookaheadDays) * 24 * time.Hour).Format(time.RFC3339)
 
-	events, usedBackend, err := FetchEvents(from, to, backend)
+	result := PollResult{StartedAt: now, From: from, To: to}
+	events, usedBackend, err := fetch(from, to, backend, &result)
+	result.Backend = usedBackend
+	result.Received = len(events)
 	if err != nil {
 		slog.Error("Failed to fetch calendar events", "error", err)
-		return nil
+		result.Error = err.Error()
 	}
 
 	// Filter to valid events only, log warnings for invalid ones
@@ -150,5 +206,8 @@ func Poll(backend string, lookaheadDays int) []Event {
 	})
 
 	slog.Info("Polled Google Calendar", "backend", usedBackend, "eventCount", len(validEvents))
-	return validEvents
+	result.Events = validEvents
+	result.Included = len(validEvents)
+	result.CompletedAt = time.Now()
+	return result
 }
