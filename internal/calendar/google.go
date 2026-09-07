@@ -500,73 +500,85 @@ func newGoogleService() (*gcal.Service, error) {
 	return svc, nil
 }
 
-func fetchEventsGoogle(from, to string) ([]Event, error) {
-	events, err := doFetchEventsGoogle(from, to)
+func fetchEventsGoogle(from, to string, result *PollResult) ([]Event, error) {
+	events, err := doFetchEventsGoogle(from, to, result)
 	if err != nil && isUnauthorized(err) {
 		slog.Warn("Google API returned 401, attempting re-authentication")
 		if reAuthErr := ReAuthenticate(); reAuthErr != nil {
 			slog.Error("Re-authentication failed", "error", reAuthErr)
-			return nil, fmt.Errorf("unauthorized and re-auth failed: %w (original: %v)", reAuthErr, err)
+			return events, fmt.Errorf("unauthorized and re-auth failed: %w (original: %v)", reAuthErr, err)
 		}
 		slog.Info("Re-authentication successful, retrying fetch")
-		return doFetchEventsGoogle(from, to)
+		result.Calendars = nil
+		return doFetchEventsGoogle(from, to, result)
 	}
 	return events, err
 }
 
 const apiTimeout = 30 * time.Second
 
-func doFetchEventsGoogle(from, to string) ([]Event, error) {
+func doFetchEventsGoogle(from, to string, result *PollResult) ([]Event, error) {
 	svc, err := newGoogleService()
 	if err != nil {
 		return nil, err
 	}
 
-	if len(selectedCalendars) > 0 {
-		var allEvents []Event
-		for _, id := range selectedCalendars {
-			events, err := fetchGoogleCalendarEvents(svc, id, calendarLabel(id), from, to)
+	return fetchGoogleCalendars(svc, from, to, selectedCalendars, result)
+}
+
+func fetchGoogleCalendars(svc *gcal.Service, from, to string, selection []string, result *PollResult) ([]Event, error) {
+	ids := append([]string(nil), selection...)
+	names := append([]string(nil), selection...)
+	if len(ids) == 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), apiTimeout)
+		defer cancel()
+		pageToken := ""
+		for {
+			calendars, err := svc.CalendarList.List().PageToken(pageToken).Context(ctx).Do()
 			if err != nil {
-				return nil, fmt.Errorf("fetch events for calendar %q: %w", id, err)
+				return nil, fmt.Errorf("list calendars: %w", err)
 			}
-			allEvents = append(allEvents, events...)
+			for _, cal := range calendars.Items {
+				name := cal.SummaryOverride
+				if name == "" {
+					name = cal.Summary
+				}
+				if name == "" {
+					name = cal.Id
+				}
+				ids = append(ids, cal.Id)
+				names = append(names, name)
+			}
+			pageToken = calendars.NextPageToken
+			if pageToken == "" {
+				break
+			}
 		}
-		return allEvents, nil
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), apiTimeout)
-	defer cancel()
-
-	calendars, err := svc.CalendarList.List().Context(ctx).Do()
-	if err != nil {
-		return nil, fmt.Errorf("list calendars: %w", err)
-	}
-
-	var allEvents []Event
-	for _, cal := range calendars.Items {
-		name := cal.SummaryOverride
-		if name == "" {
-			name = cal.Summary
+	return collectCalendars(names, func(i int) ([]Event, error) {
+		label := names[i]
+		if len(selection) > 0 {
+			label = calendarLabel(ids[i])
 		}
-		if name == "" {
-			name = cal.Id
-		}
-		events, err := fetchGoogleCalendarEvents(svc, cal.Id, name, from, to)
-		if err != nil {
-			slog.Warn("Failed to fetch events for calendar, skipping",
-				"calendar", name, "error", err)
-			continue
-		}
-		allEvents = append(allEvents, events...)
-	}
-	return allEvents, nil
+		return fetchGoogleCalendarEvents(svc, ids[i], label, from, to)
+	}, result)
 }
 
 // isUnauthorized checks if an error is a Google API 401 response.
 func isUnauthorized(err error) bool {
-	var apiErr *googleapi.Error
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := err.(*googleapi.Error); ok {
 		return apiErr.Code == 401
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, child := range joined.Unwrap() {
+			if isUnauthorized(child) {
+				return true
+			}
+		}
+		return false
+	}
+	if child := errors.Unwrap(err); child != nil {
+		return isUnauthorized(child)
 	}
 	return false
 }

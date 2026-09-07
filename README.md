@@ -23,6 +23,11 @@ A calendar reminder daemon that makes sure you never miss a meeting. Serves a lo
 
 The dashboard lives at `http://127.0.0.1:47448/` (override with `--port`). In idle state it shows upcoming events as expandable cards with countdowns, attendees, Meet links, descriptions, and a link back into Google Calendar. When a reminder fires, the same page flips into a flashing red panic view with a huge ACKNOWLEDGE button and a prominent Join Google Meet button if the event has a hangout link. The browser tab is auto-focused so you can't hide from it.
 
+The top banner separates authentication from actual calendar fetches. It shows the last successful fetch time, received and filtered event counts, and per-calendar coverage when the backend provides it. Expand **Fetch details** for the requested date range, duration, trigger and errors. **Fetch now** / **Retry fetch** requests a backend poll; successful re-authentication also requests one.
+
+A failed or partial fetch keeps the previous complete event snapshot and marks it as potentially outdated. A successful fetch of zero events clears it. Fetch history is kept in memory, so a restarted daemon reports no successful fetch until its first complete poll.
+
+
 Try it with no calendar connection required:
 
 ```bash
@@ -140,7 +145,7 @@ oh-shit-meeting &; disown
 ## How It Works
 
 1. Starts a local HTTP server on `127.0.0.1:<--port>` serving a single-page dashboard; also puts a calendar status icon in the system tray where one is available
-2. Polls Google Calendar in a **background goroutine** every poll interval (with 30s timeout per API call), and requests an immediate poll whenever the dashboard is loaded or refreshed
+2. Polls Google Calendar in a **background goroutine** every poll interval (with 30s timeout per API call), and requests an immediate poll whenever the dashboard is loaded or refreshed, the fetch button is clicked, or re-authentication succeeds
 3. Checks reminders **every second** against cached events (never blocked by polling)
 4. For each upcoming event, checks:
    - Custom reminder overrides (popup reminders only)

@@ -2,6 +2,7 @@ package gui
 
 import (
 	"bytes"
+	"encoding/json"
 	"image/color"
 	"image/png"
 	"net/http"
@@ -445,5 +446,58 @@ func TestSplitEvents_PopulatesReminders(t *testing.T) {
 	}
 	if upcoming[0].Reminders[1].ID != "global" || upcoming[0].Reminders[1].Acked {
 		t.Errorf("expected second reminder id=global acked=false, got %+v", upcoming[0].Reminders[1])
+	}
+}
+
+func TestRefreshEndpointGuardsAndQueues(t *testing.T) {
+	for _, tc := range []struct {
+		name, method, host, origin string
+		enabled                    bool
+		code                       int
+	}{
+		{"refresh", "POST", "127.0.0.1:8080", "http://127.0.0.1:8080", true, 202},
+		{"method", "GET", "127.0.0.1:8080", "", true, 405},
+		{"foreign origin", "POST", "127.0.0.1:8080", "https://example.com", true, 403},
+		{"foreign host", "POST", "example.com", "", true, 403},
+		{"disabled", "POST", "127.0.0.1:8080", "", false, 503},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			called := false
+			config := Config{Port: 8080}
+			if tc.enabled {
+				config.RefreshFn = func() { called = true }
+			}
+			withStubConfig(t, config)
+			req := httptest.NewRequest(tc.method, "http://"+tc.host+"/refresh", nil)
+			req.Header.Set("Origin", tc.origin)
+			response := httptest.NewRecorder()
+			guardLocal(handleRefresh)(response, req)
+			if response.Code != tc.code || called != (tc.code == 202) {
+				t.Fatalf("code=%d, called=%v", response.Code, called)
+			}
+		})
+	}
+}
+
+func TestStateIncludesBackendFetchOutcome(t *testing.T) {
+	completed := time.Now().UTC().Truncate(time.Second)
+	withStubConfig(t, Config{
+		EventsFn:  func() []calendar.Event { return nil },
+		RefreshFn: func() {},
+		FetchStatusFn: func() FetchStatus {
+			return FetchStatus{
+				State: "partial", Reason: "after re-auth", LastSuccessAt: completed.Add(-time.Minute),
+				PollResult: calendar.PollResult{CompletedAt: completed, Received: 12, Included: 9, Error: "team unavailable", Calendars: []calendar.CalendarResult{{Name: "Work", Received: 12}, {Name: "Team", Error: "unavailable"}}},
+			}
+		},
+	})
+	response := httptest.NewRecorder()
+	handleState(response, httptest.NewRequest("GET", "/state", nil))
+	var state stateDTO
+	if err := json.Unmarshal(response.Body.Bytes(), &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.Fetch == nil || state.Fetch.State != "partial" || state.Fetch.Received != 12 || state.Fetch.Included != 9 || !state.Fetch.CanRefresh || !state.Fetch.CompletedAt.Equal(completed) || len(state.Fetch.Calendars) != 2 {
+		t.Fatalf("fetch DTO = %+v", state.Fetch)
 	}
 }

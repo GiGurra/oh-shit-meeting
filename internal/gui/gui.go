@@ -38,7 +38,8 @@ type Config struct {
 	UnackReminderFn func(eventID string, startTime time.Time, reminderID string) error
 	// AuthStatusFn is called whenever the dashboard or tray needs to know
 	// whether browser auth is current. May be nil (tray stays healthy).
-	AuthStatusFn func() AuthStatus
+	AuthStatusFn  func() AuthStatus
+	FetchStatusFn func() FetchStatus
 	// ReAuthFn triggers the OAuth2 browser flow. May be nil to disable the
 	// re-auth button and tray menu item.
 	ReAuthFn func() error
@@ -55,6 +56,16 @@ type AuthStatus struct {
 	// threshold (AuthenticatedAt + MaxAge). Zero if AuthenticatedAt is zero.
 	ExpiresAt time.Time
 	MaxAge    time.Duration
+}
+
+// FetchStatus separates credential health from the result of actual calendar IO.
+// Timestamps describe this process; a restart starts with no known successful fetch.
+type FetchStatus struct {
+	calendar.PollResult
+	State         string    `json:"state"`
+	Reason        string    `json:"reason"`
+	LastSuccessAt time.Time `json:"lastSuccessAt"`
+	CanRefresh    bool      `json:"canRefresh"`
 }
 
 // NeedsAttention is true when the tray should show the auth-attention icon: there's
@@ -145,6 +156,7 @@ func Init(c Config) error {
 	mux.HandleFunc("/ack-reminder", guardLocal(handleReminderAck))
 	mux.HandleFunc("/unack-reminder", guardLocal(handleReminderUnack))
 	mux.HandleFunc("/reauth", guardLocal(handleReAuth))
+	mux.HandleFunc("/refresh", guardLocal(handleRefresh))
 
 	addr := fmt.Sprintf("127.0.0.1:%d", cfg.Port)
 	ln, err := net.Listen("tcp", addr)
@@ -356,11 +368,12 @@ type attendeeDTO struct {
 }
 
 type stateDTO struct {
-	Alert    *alertDTO  `json:"alert,omitempty"`
-	Previous []eventDTO `json:"previous"`
-	Upcoming []eventDTO `json:"upcoming"`
-	Now      time.Time  `json:"now"`
-	Auth     *authDTO   `json:"auth,omitempty"`
+	Alert    *alertDTO    `json:"alert,omitempty"`
+	Previous []eventDTO   `json:"previous"`
+	Upcoming []eventDTO   `json:"upcoming"`
+	Now      time.Time    `json:"now"`
+	Auth     *authDTO     `json:"auth,omitempty"`
+	Fetch    *FetchStatus `json:"fetch,omitempty"`
 }
 
 type authDTO struct {
@@ -470,9 +483,32 @@ func handleState(w http.ResponseWriter, r *http.Request) {
 		Upcoming: upcoming,
 		Now:      time.Now(),
 		Auth:     buildAuthDTO(),
+		Fetch:    buildFetchDTO(),
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func buildFetchDTO() *FetchStatus {
+	if cfg.FetchStatusFn == nil {
+		return nil
+	}
+	status := cfg.FetchStatusFn()
+	status.CanRefresh = cfg.RefreshFn != nil
+	return &status
+}
+
+func handleRefresh(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if cfg.RefreshFn == nil {
+		http.Error(w, "refresh not configured", http.StatusServiceUnavailable)
+		return
+	}
+	cfg.RefreshFn()
+	w.WriteHeader(http.StatusAccepted)
 }
 
 func buildAuthDTO() *authDTO {
@@ -969,6 +1005,31 @@ const indexHTML = `<!doctype html>
     .auth-status.warn { background: #3a2f08; border-color: #b08a2c; color: #f4d27a; }
   }
 
+  .fetch-status { border: 1px solid #ccc6; border-radius: 0.5rem; padding: 1rem; margin-bottom: 1rem; }
+  .fetch-heading { display: flex; justify-content: space-between; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
+  .fetch-badge { display: inline-block; font-size: 0.8rem; margin-left: 0.5rem; padding: 0.2rem 0.5rem; border-radius: 0.25rem; background: #e9f5ed; color: #236b3a; }
+  .waiting .fetch-badge { background: #e9edf1; color: #526171; }
+  .fetch-status.fetching { background: #f2f7fd; border-color: #bad1ed; }
+  .fetching .fetch-badge { background: #e0edfc; color: #285b9b; }
+  .fetch-status.partial { background: #fffaf0; border-color: #e2ca91; }
+  .partial .fetch-badge { background: #f9edcc; color: #806019; }
+  .fetch-status.failed { background: #fff3f2; border-color: #e4b1ac; }
+  .failed .fetch-badge { background: #f8dad7; color: #a33229; }
+  .fetch-meta { font-size: 0.85rem; margin-top: 0.65rem; line-height: 1.6; overflow-wrap: anywhere; }
+  .fetch-details { font-size: 0.8rem; margin-top: 0.65rem; overflow-wrap: anywhere; }
+  .fetch-details summary { cursor: pointer; }
+  .fetch-status .auth-status { margin: 0.8rem 0 0; font-size: 0.8rem; }
+  .fetch-status .auth-status[data-state="ok"] { border: 0; border-top: 1px solid #ccc6; border-radius: 0; padding: 0.8rem 0 0; }
+  .fetch-btn { font: inherit; font-size: 0.85rem; padding: 0.45rem 0.75rem; border: 1px solid #8889; border-radius: 0.25rem; background: transparent; color: inherit; cursor: pointer; }
+  .fetch-btn:disabled { opacity: 0.6; cursor: wait; }
+  .fetch-error { color: #c82828; font-size: 0.85rem; }
+  @media (prefers-color-scheme: dark) {
+    .fetch-status.fetching { background: #18283c; border-color: #41628a; }
+    .fetch-status.partial { background: #332b19; border-color: #806a36; }
+    .fetch-status.failed { background: #371e1e; border-color: #8e4740; }
+    .fetch-error { color: #ffa69e; }
+  }
+
   .panic {
     position: fixed; inset: 0;
     display: flex; align-items: center; justify-content: center;
@@ -1200,7 +1261,8 @@ function renderAuthBlock(auth, nowMs) {
   const cls = warn ? "auth-status warn" : "auth-status";
   return '<div class="' + cls + '" data-state="ok">'
     + '<div><span class="label">Google Calendar auth:</span> '
-    +   'fresh, re-auth required in <span class="countdown" id="reauthCountdown">'
+    +   (knownFetchTime(auth.authenticatedAt) ? 'authenticated ' + escapeHtml(new Date(auth.authenticatedAt).toLocaleString()) + ' · ' : 'authentication date unknown · ')
+    +   're-auth required in <span class="countdown" id="reauthCountdown">'
     +   fmtDuration(timeLeftMs) + '</span></div>'
     + '<div>' + reauthBtn + '</div>'
     + '</div>';
@@ -1226,15 +1288,75 @@ function bindReAuthButton() {
   });
 }
 
+function knownFetchTime(value) {
+  return value && !value.startsWith("0001-") && Number.isFinite(new Date(value).getTime());
+}
+
+function fetchTime(value, now) {
+  if (!knownFetchTime(value)) return "No successful fetch yet";
+  const date = new Date(value);
+  return fmtDuration(Math.max(0, now - date.getTime())) + " ago · " + date.toLocaleString();
+}
+
+function renderFetchBlock(f, auth, now) {
+  if (!f) return renderAuthBlock(auth, now);
+  const labels = {success: "✓ Fetched successfully", fetching: "↻ Fetching…", partial: "! Partial results", failed: "! Fetch failed"};
+  const state = Object.hasOwn(labels, f.state) ? f.state : "waiting";
+  const busy = state === "fetching";
+  const hasResult = knownFetchTime(f.completedAt);
+  let html = '<section class="fetch-status ' + state + '" aria-label="Calendar fetch status">';
+  html += '<div class="fetch-heading"><strong>Google Calendar <span class="fetch-badge">' + (labels[state] || "No successful fetch yet") + '</span></strong>';
+  if (f.canRefresh) html += '<button class="fetch-btn" id="fetchNowBtn"' + (busy ? ' disabled' : '') + '>' + (busy ? 'Fetching…' : (state === 'failed' || state === 'partial') ? 'Retry fetch' : 'Fetch now') + '</button>';
+  html += '</div><div class="fetch-meta">';
+  if (busy) html += '<div><b>' + (f.reason === 'after re-auth' ? 'Authentication succeeded. Fetching calendar events from Google…' : 'Fetching calendar events from Google…') + '</b></div>';
+  if (hasResult && state !== 'success') html += '<div>Latest attempt: <span data-fetch-time="' + escapeAttr(f.completedAt) + '">' + escapeHtml(fetchTime(f.completedAt, now)) + '</span></div>';
+  html += '<div><b>Last successful fetch: <span data-fetch-time="' + escapeAttr(f.lastSuccessAt || '') + '">' + escapeHtml(fetchTime(f.lastSuccessAt, now)) + '</span></b></div>';
+  if (hasResult) {
+    html += '<div>' + f.received + ' events received · ' + f.included + ' timed events';
+    if (f.calendars) html += ' · ' + f.calendars.filter(c => !c.error).length + '/' + f.calendars.length + ' calendars fetched';
+    html += '</div>';
+  }
+  if (state === 'partial' || state === 'failed') html += '<div>' + (knownFetchTime(f.lastSuccessAt) ? 'Showing the previous complete fetch; events may be outdated.' : 'No complete calendar data available yet.') + '</div>';
+  if (busy && knownFetchTime(f.lastSuccessAt)) html += '<div>Showing previously fetched events.</div>';
+  html += '</div>';
+  if (hasResult) {
+    html += '<details class="fetch-details" data-details-key="fetch-details"><summary>Fetch details · ' + escapeHtml(f.reason || '') + ' · ' + Math.max(0, (new Date(f.completedAt) - new Date(f.startedAt)) / 1000).toFixed(1) + ' seconds</summary>';
+    html += '<p>Backend: ' + escapeHtml(f.backend || 'unavailable') + '<br>Requested range: ' + escapeHtml(f.from) + ' → ' + escapeHtml(f.to) + '<br>' + (f.received - f.included) + ' excluded (all-day, working location or invalid start time).</p>';
+    if (f.error) html += '<p class="fetch-error">' + escapeHtml(f.error) + '</p>';
+    for (const c of f.calendars || []) html += '<p><b>' + escapeHtml(c.name) + '</b>: ' + (c.error ? 'Failed — ' + escapeHtml(c.error) : c.received + ' events received') + '</p>';
+    html += '</details>';
+  }
+  html += renderAuthBlock(auth, now);
+  return html + '<div id="fetchActionError" class="fetch-error" role="alert"></div></section>';
+}
+
+function bindFetchButton() {
+  const btn = document.getElementById('fetchNowBtn');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    try {
+      const response = await fetch('/refresh', {method: 'POST'});
+      if (!response.ok) throw new Error('Could not request a fetch. Please try again.');
+      await tick();
+    } catch (error) {
+      const output = document.getElementById('fetchActionError');
+      if (output) output.textContent = 'Could not request a fetch. Please try again.';
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
 function renderDashboard(state) {
   const previous = state.previous || [];
   const upcoming = state.upcoming || [];
   const now = new Date(state.now).getTime();
-  const key = "dash:" + authStatusKey(state.auth) + "::"
+  const key = "dash:" + authStatusKey(state.auth) + "::" + JSON.stringify(state.fetch) + "::"
     + previous.map(eventKey).join(";;") + "::" + upcoming.map(eventKey).join(";;");
   if (key !== lastRendered) {
     let html = '<div class="dashboard">';
-    html += renderAuthBlock(state.auth, now);
+    html += renderFetchBlock(state.fetch, state.auth, now);
     html += '<h1>oh-shit-meeting <span class="status">running</span></h1>';
 
     if (previous.length > 0) {
@@ -1259,11 +1381,13 @@ function renderDashboard(state) {
     lastRendered = key;
     bindAckButtons();
     bindReAuthButton();
+    bindFetchButton();
   } else {
     // live-update countdowns without collapsing any open accordion. The auth
     // countdown lives in #reauthCountdown so we update it separately and skip
     // it when iterating event countdowns.
     updateAuthCountdown(state.auth, now);
+    root.querySelectorAll("[data-fetch-time]").forEach(el => { el.textContent = fetchTime(el.dataset.fetchTime, now); });
     const spans = Array.from(root.querySelectorAll(".countdown")).filter(s => s.id !== "reauthCountdown");
     const all = previous.concat(upcoming);
     all.forEach((e, i) => {
