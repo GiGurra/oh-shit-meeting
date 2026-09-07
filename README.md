@@ -12,6 +12,7 @@ A calendar reminder daemon that makes sure you never miss a meeting. Serves a lo
 - **Systray icon** — calendar-shaped status at a glance: check when healthy, amber keyhole when auth needs attention, and alternating red alert frames during active alerts; "Open dashboard" / "Quit" menu. Pure-Go on Windows; gracefully no-ops where no tray host is available (e.g. WSL, some GNOME setups)
 - **Google Calendar integration** — native OAuth2 (or `gws`/`gog` CLI as an explicit backend)
 - **Custom reminder support** — respects your calendar's reminder settings (30m, 2h, etc.)
+- **Response-aware alerts** — meetings you declined are shown as handled and never alert; unanswered invitations can be included or silenced from a persistent dashboard preference
 - **Global fallback reminder** — configurable default reminder for all events
 - **Non-blocking polling** — calendar polling runs in a background goroutine with timeouts, so alerts always fire on time even if the API is slow
 - **Cross-platform audio** — macOS system sounds; generated tones on Linux/Windows (experimental, untested)

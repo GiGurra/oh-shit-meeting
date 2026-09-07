@@ -18,6 +18,7 @@ import (
 	"github.com/gigurra/oh-shit-meeting/internal/calendar"
 	"github.com/gigurra/oh-shit-meeting/internal/format"
 	"github.com/gigurra/oh-shit-meeting/internal/gui"
+	"github.com/gigurra/oh-shit-meeting/internal/preferences"
 	"github.com/gigurra/oh-shit-meeting/internal/reminder"
 	"github.com/gigurra/oh-shit-meeting/internal/secret"
 	"github.com/gofrs/flock"
@@ -302,9 +303,14 @@ func run(params *Params) {
 	store := &eventStore{}
 	pollNow := make(chan string, 1)
 	ackStore := &ack.FileStore{}
+	preferenceStore, preferenceErr := preferences.OpenDefault()
+	if preferenceErr != nil {
+		slog.Warn("Could not load preferences; using defaults", "error", preferenceErr)
+	}
 	finder := reminder.NewFinder(ackStore, &reminder.RealClock{}, reminder.Config{
-		WarnBefore: params.WarnBefore,
-		Sound:      params.Sound,
+		WarnBefore:                 params.WarnBefore,
+		Sound:                      params.Sound,
+		AlertUnansweredInvitations: preferenceStore.AlertUnansweredInvitations,
 	})
 	if err := gui.Init(gui.Config{
 		Port:     params.Port,
@@ -312,8 +318,10 @@ func run(params *Params) {
 		RefreshFn: func() {
 			requestPoll(pollNow, "manual refresh")
 		},
-		AuthStatusFn:  buildAuthStatus,
-		FetchStatusFn: store.fetchStatus,
+		AuthStatusFn:                    buildAuthStatus,
+		FetchStatusFn:                   store.fetchStatus,
+		AlertUnansweredInvitationsFn:    preferenceStore.AlertUnansweredInvitations,
+		SetAlertUnansweredInvitationsFn: preferenceStore.SetAlertUnansweredInvitations,
 		ReAuthFn: func() error {
 			return reAuthAndRequestPoll(reAuth, pollNow)
 		},

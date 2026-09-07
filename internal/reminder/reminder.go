@@ -44,6 +44,9 @@ type Info struct {
 type Config struct {
 	WarnBefore time.Duration
 	Sound      string
+	// AlertUnansweredInvitations is evaluated for each reminder check so a
+	// dashboard preference change takes effect immediately. Nil defaults on.
+	AlertUnansweredInvitations func() bool
 }
 
 // Finder finds reminders that should fire
@@ -156,6 +159,12 @@ func (f *Finder) FindNext(events []calendar.Event) *Info {
 	now := f.clock.Now()
 
 	for _, event := range events {
+		if event.IsDeclinedBySelf() {
+			continue
+		}
+		if event.IsAwaitingSelfResponse() && f.config.AlertUnansweredInvitations != nil && !f.config.AlertUnansweredInvitations() {
+			continue
+		}
 		startTime, err := time.Parse(time.RFC3339, event.Start.DateTime)
 		if err != nil {
 			continue

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -40,6 +41,10 @@ type Config struct {
 	// whether browser auth is current. May be nil (tray stays healthy).
 	AuthStatusFn  func() AuthStatus
 	FetchStatusFn func() FetchStatus
+	// AlertUnansweredInvitationsFn and its setter expose the persistent alert
+	// preference to the dashboard. Both may be nil to hide the control.
+	AlertUnansweredInvitationsFn    func() bool
+	SetAlertUnansweredInvitationsFn func(bool) error
 	// ReAuthFn triggers the OAuth2 browser flow. May be nil to disable the
 	// re-auth button and tray menu item.
 	ReAuthFn func() error
@@ -157,6 +162,7 @@ func Init(c Config) error {
 	mux.HandleFunc("/unack-reminder", guardLocal(handleReminderUnack))
 	mux.HandleFunc("/reauth", guardLocal(handleReAuth))
 	mux.HandleFunc("/refresh", guardLocal(handleRefresh))
+	mux.HandleFunc("/preferences/alert-unanswered", guardLocal(handleAlertUnansweredPreference))
 
 	addr := fmt.Sprintf("127.0.0.1:%d", cfg.Port)
 	ln, err := net.Listen("tcp", addr)
@@ -337,20 +343,22 @@ type alertDTO struct {
 }
 
 type eventDTO struct {
-	ID          string        `json:"id"`
-	Summary     string        `json:"summary"`
-	StartTime   time.Time     `json:"startTime"`
-	EndTime     time.Time     `json:"endTime,omitempty"`
-	Location    string        `json:"location,omitempty"`
-	Organizer   string        `json:"organizer,omitempty"`
-	Calendar    string        `json:"calendar,omitempty"`
-	Description string        `json:"description,omitempty"`
-	HangoutLink string        `json:"hangoutLink,omitempty"`
-	HtmlLink    string        `json:"htmlLink,omitempty"`
-	Attendees   []attendeeDTO `json:"attendees,omitempty"`
-	Status      string        `json:"status,omitempty"`
-	Acked       bool          `json:"acked,omitempty"`
-	Reminders   []reminderDTO `json:"reminders,omitempty"`
+	ID               string        `json:"id"`
+	Summary          string        `json:"summary"`
+	StartTime        time.Time     `json:"startTime"`
+	EndTime          time.Time     `json:"endTime,omitempty"`
+	Location         string        `json:"location,omitempty"`
+	Organizer        string        `json:"organizer,omitempty"`
+	Calendar         string        `json:"calendar,omitempty"`
+	Description      string        `json:"description,omitempty"`
+	HangoutLink      string        `json:"hangoutLink,omitempty"`
+	HtmlLink         string        `json:"htmlLink,omitempty"`
+	Attendees        []attendeeDTO `json:"attendees,omitempty"`
+	Status           string        `json:"status,omitempty"`
+	Acked            bool          `json:"acked,omitempty"`
+	Declined         bool          `json:"declined,omitempty"`
+	AwaitingResponse bool          `json:"awaitingResponse,omitempty"`
+	Reminders        []reminderDTO `json:"reminders,omitempty"`
 }
 
 type reminderDTO struct {
@@ -368,12 +376,17 @@ type attendeeDTO struct {
 }
 
 type stateDTO struct {
-	Alert    *alertDTO    `json:"alert,omitempty"`
-	Previous []eventDTO   `json:"previous"`
-	Upcoming []eventDTO   `json:"upcoming"`
-	Now      time.Time    `json:"now"`
-	Auth     *authDTO     `json:"auth,omitempty"`
-	Fetch    *FetchStatus `json:"fetch,omitempty"`
+	Alert       *alertDTO       `json:"alert,omitempty"`
+	Previous    []eventDTO      `json:"previous"`
+	Upcoming    []eventDTO      `json:"upcoming"`
+	Now         time.Time       `json:"now"`
+	Auth        *authDTO        `json:"auth,omitempty"`
+	Fetch       *FetchStatus    `json:"fetch,omitempty"`
+	Preferences *preferencesDTO `json:"preferences,omitempty"`
+}
+
+type preferencesDTO struct {
+	AlertUnansweredInvitations bool `json:"alertUnansweredInvitations"`
 }
 
 type authDTO struct {
@@ -478,15 +491,23 @@ func handleState(w http.ResponseWriter, r *http.Request) {
 
 	previous, upcoming := visibleEvents()
 	resp := stateDTO{
-		Alert:    al,
-		Previous: previous,
-		Upcoming: upcoming,
-		Now:      time.Now(),
-		Auth:     buildAuthDTO(),
-		Fetch:    buildFetchDTO(),
+		Alert:       al,
+		Previous:    previous,
+		Upcoming:    upcoming,
+		Now:         time.Now(),
+		Auth:        buildAuthDTO(),
+		Fetch:       buildFetchDTO(),
+		Preferences: buildPreferencesDTO(),
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func buildPreferencesDTO() *preferencesDTO {
+	if cfg.AlertUnansweredInvitationsFn == nil {
+		return nil
+	}
+	return &preferencesDTO{AlertUnansweredInvitations: cfg.AlertUnansweredInvitationsFn()}
 }
 
 func buildFetchDTO() *FetchStatus {
@@ -509,6 +530,28 @@ func handleRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg.RefreshFn()
 	w.WriteHeader(http.StatusAccepted)
+}
+
+func handleAlertUnansweredPreference(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if cfg.SetAlertUnansweredInvitationsFn == nil {
+		http.Error(w, "preference not configured", http.StatusServiceUnavailable)
+		return
+	}
+	enabled, err := strconv.ParseBool(r.URL.Query().Get("enabled"))
+	if err != nil {
+		http.Error(w, "invalid enabled value", http.StatusBadRequest)
+		return
+	}
+	if err := cfg.SetAlertUnansweredInvitationsFn(enabled); err != nil {
+		slog.Error("failed to save unanswered invitation preference", "error", err)
+		http.Error(w, "failed to save preference", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func buildAuthDTO() *authDTO {
@@ -711,18 +754,20 @@ func toEventDTO(e calendar.Event, st time.Time) eventDTO {
 		})
 	}
 	return eventDTO{
-		ID:          e.ID,
-		Summary:     e.Summary,
-		StartTime:   st,
-		EndTime:     end,
-		Location:    e.Location,
-		Organizer:   org,
-		Calendar:    e.Calendar,
-		Description: e.Description,
-		HangoutLink: e.HangoutLink,
-		HtmlLink:    e.HtmlLink,
-		Attendees:   attendees,
-		Status:      e.Status,
+		ID:               e.ID,
+		Summary:          e.Summary,
+		StartTime:        st,
+		EndTime:          end,
+		Location:         e.Location,
+		Organizer:        org,
+		Calendar:         e.Calendar,
+		Description:      e.Description,
+		HangoutLink:      e.HangoutLink,
+		HtmlLink:         e.HtmlLink,
+		Attendees:        attendees,
+		Status:           e.Status,
+		Declined:         e.IsDeclinedBySelf(),
+		AwaitingResponse: e.IsAwaitingSelfResponse(),
 	}
 }
 
@@ -899,17 +944,17 @@ const indexHTML = `<!doctype html>
   .event[open] > summary::before { transform: rotate(90deg); }
   .event .title { font-weight: 600; font-size: 1.1rem; }
   .event .meta { font-size: 0.9rem; opacity: 0.8; margin-top: 0.25rem; padding-left: 1em; }
-  .event.acked > summary .title { text-decoration: line-through; opacity: 0.6; }
-  .event.acked > summary { opacity: 0.85; }
-  /* Collapsed acked rows shrink to a single ellipsized line so they don't
+  .event.acked > summary .title, .event.declined > summary .title { text-decoration: line-through; opacity: 0.6; }
+  .event.acked > summary, .event.declined > summary { opacity: 0.85; }
+  /* Collapsed handled rows shrink to a single ellipsized line so they don't
      compete for attention with events that still need action. */
-  .event.acked:not([open]) > summary {
+  .event.acked:not([open]) > summary, .event.declined:not([open]) > summary {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
     padding-right: 1rem;
   }
-  .event.acked:not([open]) > summary .meta {
+  .event.acked:not([open]) > summary .meta, .event.declined:not([open]) > summary .meta {
     display: inline;
     margin-top: 0;
     padding-left: 0.5rem;
@@ -920,6 +965,13 @@ const indexHTML = `<!doctype html>
     background: #1a7f1a; color: white; border-radius: 999px;
     font-size: 0.7rem; font-weight: 600; vertical-align: middle; letter-spacing: 0.02em;
   }
+  .declined-badge, .awaiting-badge {
+    display: inline-block; margin-left: 0.4rem; padding: 0.05rem 0.45rem;
+    border-radius: 999px; font-size: 0.7rem; font-weight: 600;
+    vertical-align: middle; letter-spacing: 0.02em;
+  }
+  .declined-badge { background: #e9ecef; color: #59616b; }
+  .awaiting-badge { background: #fff3cd; color: #795b00; }
   .event .body { padding: 0.25rem 1rem 1rem 2rem; border-top: 1px solid #ccc3; }
   .ack-actions { margin-top: 0.75rem; display: flex; gap: 0.5rem; flex-wrap: wrap; }
   .ack-btn {
@@ -1016,6 +1068,9 @@ const indexHTML = `<!doctype html>
   .fetch-status.failed { background: #fff3f2; border-color: #e4b1ac; }
   .failed .fetch-badge { background: #f8dad7; color: #a33229; }
   .fetch-meta { font-size: 0.85rem; margin-top: 0.65rem; line-height: 1.6; overflow-wrap: anywhere; }
+  .fetch-preference { border-top: 1px solid #ccc6; margin-top: 0.65rem; padding-top: 0.55rem; font-size: 0.8rem; opacity: 0.85; }
+  .fetch-preference label { display: inline-flex; align-items: center; gap: 0.4rem; cursor: pointer; }
+  .fetch-preference input { margin: 0; accent-color: #1a7f1a; }
   .fetch-details { font-size: 0.8rem; margin-top: 0.65rem; overflow-wrap: anywhere; }
   .fetch-details summary { cursor: pointer; }
   .fetch-status .auth-status { margin: 0.8rem 0 0; font-size: 0.8rem; }
@@ -1162,7 +1217,7 @@ function renderEventBody(e) {
 }
 
 function renderRemindersSection(e) {
-  if (!e.reminders || !e.reminders.length || !e.id) return "";
+  if (e.declined || !e.reminders || !e.reminders.length || !e.id) return "";
   const payload = 'data-event-id="' + escapeAttr(e.id) + '" data-start="' + escapeAttr(e.startTime) + '"';
   let html = '<section><h3>Reminders</h3><ul class="reminders">';
   for (const r of e.reminders) {
@@ -1180,7 +1235,7 @@ function renderRemindersSection(e) {
 }
 
 function renderAckActions(e) {
-  if (!e.id) return "";
+  if (e.declined || !e.id) return "";
   const payload = 'data-event-id="' + escapeAttr(e.id) + '" data-start="' + escapeAttr(e.startTime) + '"';
   if (e.acked) {
     return '<div class="ack-actions"><button class="ack-btn unack-btn" ' + payload + '>Remove ack</button></div>';
@@ -1190,17 +1245,19 @@ function renderAckActions(e) {
 
 function eventKey(e) {
   const remKey = (e.reminders || []).map(r => r.id + (r.acked ? "1" : "0")).join(",");
-  return (e.id || "") + "|" + (e.summary || "") + "|" + (e.startTime || "") + "|" + (e.hangoutLink || "") + "|" + ((e.attendees || []).length) + "|" + (e.description || "").length + "|" + (e.location || "") + "|" + (e.acked ? "1" : "0") + "|" + remKey;
+  return (e.id || "") + "|" + (e.summary || "") + "|" + (e.startTime || "") + "|" + (e.hangoutLink || "") + "|" + ((e.attendees || []).length) + "|" + (e.description || "").length + "|" + (e.location || "") + "|" + (e.acked ? "1" : "0") + "|" + (e.declined ? "1" : "0") + "|" + (e.awaitingResponse ? "1" : "0") + "|" + remKey;
 }
 
 function renderEventListItem(e, now) {
   const start = new Date(e.startTime);
-  const cls = 'event' + (e.acked ? ' acked' : '');
+  const cls = 'event' + (e.declined ? ' declined' : (e.acked ? ' acked' : ''));
   const detailsKey = 'event:' + (e.id || '') + '|' + (e.startTime || '');
   let html = '<li><details class="' + cls + '" data-details-key="' + escapeAttr(detailsKey) + '"><summary>';
   html += '<span class="title">' + escapeHtml(e.summary || "(no title)") + '</span>';
   if (e.hangoutLink) html += ' <span class="meet-badge" title="Has Google Meet">📹</span>';
-  if (e.acked) html += ' <span class="ack-badge">✓ ACKED</span>';
+  if (e.declined) html += ' <span class="declined-badge">× DECLINED</span>';
+  else if (e.acked) html += ' <span class="ack-badge">✓ ACKED</span>';
+  else if (e.awaitingResponse) html += ' <span class="awaiting-badge">AWAITING RESPONSE</span>';
   html += '<div class="meta">';
   html += '<span class="countdown">' + fmtDateTime(start) + ' — ' + relPhrase(start.getTime(), now) + '</span>';
   if (e.calendar)  html += ' · 📅 ' + escapeHtml(e.calendar);
@@ -1298,7 +1355,7 @@ function fetchTime(value, now) {
   return fmtDuration(Math.max(0, now - date.getTime())) + " ago · " + date.toLocaleString();
 }
 
-function renderFetchBlock(f, auth, now) {
+function renderFetchBlock(f, auth, now, preferences) {
   if (!f) return renderAuthBlock(auth, now);
   const labels = {success: "✓ Fetched successfully", fetching: "↻ Fetching…", partial: "! Partial results", failed: "! Fetch failed"};
   const state = Object.hasOwn(labels, f.state) ? f.state : "waiting";
@@ -1326,6 +1383,11 @@ function renderFetchBlock(f, auth, now) {
     for (const c of f.calendars || []) html += '<p><b>' + escapeHtml(c.name) + '</b>: ' + (c.error ? 'Failed — ' + escapeHtml(c.error) : c.received + ' events received') + '</p>';
     html += '</details>';
   }
+  if (preferences) {
+    html += '<div class="fetch-preference"><label><input type="checkbox" id="alertUnansweredCheckbox"'
+      + (preferences.alertUnansweredInvitations ? ' checked' : '')
+      + '> <span><strong>Alert for unanswered invitations</strong> · saved automatically</span></label></div>';
+  }
   html += renderAuthBlock(auth, now);
   return html + '<div id="fetchActionError" class="fetch-error" role="alert"></div></section>';
 }
@@ -1348,15 +1410,34 @@ function bindFetchButton() {
   });
 }
 
+function bindAlertUnansweredPreference() {
+  const checkbox = document.getElementById('alertUnansweredCheckbox');
+  if (!checkbox) return;
+  checkbox.addEventListener('change', async () => {
+    const enabled = checkbox.checked;
+    checkbox.disabled = true;
+    try {
+      const response = await fetch('/preferences/alert-unanswered?enabled=' + enabled, {method: 'POST'});
+      if (!response.ok) throw new Error('Could not save preference');
+    } catch (error) {
+      checkbox.checked = !enabled;
+    } finally {
+      checkbox.disabled = false;
+      lastRendered = '';
+      tick();
+    }
+  });
+}
+
 function renderDashboard(state) {
   const previous = state.previous || [];
   const upcoming = state.upcoming || [];
   const now = new Date(state.now).getTime();
-  const key = "dash:" + authStatusKey(state.auth) + "::" + JSON.stringify(state.fetch) + "::"
+  const key = "dash:" + authStatusKey(state.auth) + "::" + JSON.stringify(state.fetch) + "::" + JSON.stringify(state.preferences) + "::"
     + previous.map(eventKey).join(";;") + "::" + upcoming.map(eventKey).join(";;");
   if (key !== lastRendered) {
     let html = '<div class="dashboard">';
-    html += renderFetchBlock(state.fetch, state.auth, now);
+    html += renderFetchBlock(state.fetch, state.auth, now, state.preferences);
     html += '<h1>oh-shit-meeting <span class="status">running</span></h1>';
 
     if (previous.length > 0) {
@@ -1382,6 +1463,7 @@ function renderDashboard(state) {
     bindAckButtons();
     bindReAuthButton();
     bindFetchButton();
+    bindAlertUnansweredPreference();
   } else {
     // live-update countdowns without collapsing any open accordion. The auth
     // countdown lives in #reauthCountdown so we update it separately and skip
