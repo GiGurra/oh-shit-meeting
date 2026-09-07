@@ -104,6 +104,31 @@ func TestSplitEvents_PopulatesAckedFlag(t *testing.T) {
 	}
 }
 
+func TestSplitEvents_PopulatesOnlySelfResponseFlags(t *testing.T) {
+	now := time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
+	declined := mkEvent("declined", "Declined", now.Add(5*time.Minute), now.Add(30*time.Minute))
+	declined.Attendees = []calendar.Attendee{{Self: true, ResponseStatus: "declined"}}
+	otherDeclined := mkEvent("other", "Other declined", now.Add(10*time.Minute), now.Add(40*time.Minute))
+	otherDeclined.Attendees = []calendar.Attendee{{ResponseStatus: "declined"}, {Self: true, ResponseStatus: "accepted"}}
+	waiting := mkEvent("waiting", "Waiting", now.Add(15*time.Minute), now.Add(45*time.Minute))
+	waiting.Attendees = []calendar.Attendee{{Self: true, ResponseStatus: "needsAction"}}
+
+	_, upcoming := splitEvents([]calendar.Event{declined, otherDeclined, waiting}, now, nil, nil)
+	byID := map[string]eventDTO{}
+	for _, event := range upcoming {
+		byID[event.ID] = event
+	}
+	if !byID["declined"].Declined {
+		t.Fatal("self-declined event missing declined flag")
+	}
+	if byID["other"].Declined {
+		t.Fatal("another attendee's decline marked the event declined")
+	}
+	if !byID["waiting"].AwaitingResponse {
+		t.Fatal("self needsAction event missing awaiting-response flag")
+	}
+}
+
 func TestSplitEvents_PassesStartTimeToAckLookup(t *testing.T) {
 	// Verifies the ack lookup receives the parsed start time, not a zero value —
 	// the ack key depends on it, so getting it wrong would silently fail.
@@ -476,6 +501,42 @@ func TestRefreshEndpointGuardsAndQueues(t *testing.T) {
 				t.Fatalf("code=%d, called=%v", response.Code, called)
 			}
 		})
+	}
+}
+
+func TestAlertUnansweredPreferenceEndpoint(t *testing.T) {
+	var got bool
+	called := false
+	withStubConfig(t, Config{SetAlertUnansweredInvitationsFn: func(enabled bool) error {
+		called = true
+		got = enabled
+		return nil
+	}})
+	response := httptest.NewRecorder()
+	handleAlertUnansweredPreference(response, httptest.NewRequest(http.MethodPost, "/preferences/alert-unanswered?enabled=false", nil))
+	if response.Code != http.StatusNoContent || !called || got {
+		t.Fatalf("code=%d, called=%v, saved=%v", response.Code, called, got)
+	}
+}
+
+func TestStateIncludesAlertUnansweredPreference(t *testing.T) {
+	withStubConfig(t, Config{AlertUnansweredInvitationsFn: func() bool { return false }})
+	response := httptest.NewRecorder()
+	handleState(response, httptest.NewRequest(http.MethodGet, "/state", nil))
+	var state stateDTO
+	if err := json.Unmarshal(response.Body.Bytes(), &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.Preferences == nil || state.Preferences.AlertUnansweredInvitations {
+		t.Fatalf("preferences DTO = %+v", state.Preferences)
+	}
+}
+
+func TestIndexHTMLRendersDeclinedAndUnansweredControls(t *testing.T) {
+	for _, fragment := range []string{"declined-badge", "AWAITING RESPONSE", "Alert for unanswered invitations", "/preferences/alert-unanswered"} {
+		if !strings.Contains(indexHTML, fragment) {
+			t.Errorf("index HTML missing %q", fragment)
+		}
 	}
 }
 

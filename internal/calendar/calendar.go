@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -49,6 +50,27 @@ type Attendee struct {
 	ResponseStatus string `json:"responseStatus,omitempty"`
 	Self           bool   `json:"self,omitempty"`
 	Organizer      bool   `json:"organizer,omitempty"`
+}
+
+// SelfResponseStatus returns the authenticated user's response, ignoring the
+// responses of every other attendee.
+func (e Event) SelfResponseStatus() (string, bool) {
+	for _, attendee := range e.Attendees {
+		if attendee.Self {
+			return attendee.ResponseStatus, true
+		}
+	}
+	return "", false
+}
+
+func (e Event) IsDeclinedBySelf() bool {
+	status, ok := e.SelfResponseStatus()
+	return ok && strings.EqualFold(status, "declined")
+}
+
+func (e Event) IsAwaitingSelfResponse() bool {
+	status, ok := e.SelfResponseStatus()
+	return ok && strings.EqualFold(status, "needsAction")
 }
 
 type Organizer struct {

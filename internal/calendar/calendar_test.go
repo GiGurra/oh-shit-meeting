@@ -206,6 +206,31 @@ func TestDefaultFetcher_ImplementsInterface(t *testing.T) {
 	var _ Fetcher = &DefaultFetcher{}
 }
 
+func TestEventSelfResponseHelpersOnlyUseSelfAttendee(t *testing.T) {
+	tests := []struct {
+		name              string
+		attendees         []Attendee
+		declined, waiting bool
+	}{
+		{"self declined", []Attendee{{Self: true, ResponseStatus: "declined"}}, true, false},
+		{"other declined", []Attendee{{ResponseStatus: "declined"}, {Self: true, ResponseStatus: "accepted"}}, false, false},
+		{"self awaiting", []Attendee{{Self: true, ResponseStatus: "needsAction"}}, false, true},
+		{"self tentative", []Attendee{{Self: true, ResponseStatus: "tentative"}}, false, false},
+		{"no self attendee", []Attendee{{ResponseStatus: "declined"}}, false, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			event := Event{Attendees: tc.attendees}
+			if got := event.IsDeclinedBySelf(); got != tc.declined {
+				t.Errorf("IsDeclinedBySelf() = %v, want %v", got, tc.declined)
+			}
+			if got := event.IsAwaitingSelfResponse(); got != tc.waiting {
+				t.Errorf("IsAwaitingSelfResponse() = %v, want %v", got, tc.waiting)
+			}
+		})
+	}
+}
+
 func TestLookbackStart_UsesStartOfDayWhenEarlier(t *testing.T) {
 	// Mid-afternoon: start-of-day (00:00) is earlier than now-1h (15:00),
 	// so the function should return start-of-day.

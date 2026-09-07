@@ -689,6 +689,54 @@ func TestFindNext_EventAckSuppressesGlobal(t *testing.T) {
 	}
 }
 
+func TestFindNext_SelfDeclinedNeverAlerts(t *testing.T) {
+	now := time.Date(2026, 2, 4, 9, 0, 0, 0, time.UTC)
+	event := makeEvent("evt1", "Declined Meeting", now.Add(3*time.Minute), now.Add(time.Hour))
+	event.Attendees = []calendar.Attendee{
+		{Email: "me@example.com", Self: true, ResponseStatus: "declined"},
+		{Email: "other@example.com", ResponseStatus: "accepted"},
+	}
+	finder := NewFinder(newMockAckStore(), &mockClock{now: now}, Config{WarnBefore: 5 * time.Minute})
+	if got := finder.FindNext([]calendar.Event{event}); got != nil {
+		t.Fatalf("self-declined meeting alerted: %+v", got)
+	}
+}
+
+func TestFindNext_OtherAttendeeDecliningDoesNotSuppressAlert(t *testing.T) {
+	now := time.Date(2026, 2, 4, 9, 0, 0, 0, time.UTC)
+	event := makeEvent("evt1", "Accepted Meeting", now.Add(3*time.Minute), now.Add(time.Hour))
+	event.Attendees = []calendar.Attendee{
+		{Email: "me@example.com", Self: true, ResponseStatus: "accepted"},
+		{Email: "other@example.com", ResponseStatus: "declined"},
+	}
+	finder := NewFinder(newMockAckStore(), &mockClock{now: now}, Config{WarnBefore: 5 * time.Minute})
+	if got := finder.FindNext([]calendar.Event{event}); got == nil {
+		t.Fatal("another attendee declining suppressed the alert")
+	}
+}
+
+func TestFindNext_UnansweredPreference(t *testing.T) {
+	now := time.Date(2026, 2, 4, 9, 0, 0, 0, time.UTC)
+	event := makeEvent("evt1", "Unanswered Meeting", now.Add(3*time.Minute), now.Add(time.Hour))
+	event.Attendees = []calendar.Attendee{{Email: "me@example.com", Self: true, ResponseStatus: "needsAction"}}
+	enabled := true
+	finder := NewFinder(newMockAckStore(), &mockClock{now: now}, Config{
+		WarnBefore:                 5 * time.Minute,
+		AlertUnansweredInvitations: func() bool { return enabled },
+	})
+	if got := finder.FindNext([]calendar.Event{event}); got == nil {
+		t.Fatal("unanswered meeting should alert while preference is enabled")
+	}
+	enabled = false
+	if got := finder.FindNext([]calendar.Event{event}); got != nil {
+		t.Fatalf("unanswered meeting alerted while preference was disabled: %+v", got)
+	}
+	event.Attendees[0].ResponseStatus = "tentative"
+	if got := finder.FindNext([]calendar.Event{event}); got == nil {
+		t.Fatal("tentative meeting should alert regardless of unanswered preference")
+	}
+}
+
 func TestFindNext_EventAckSuppressesStarted(t *testing.T) {
 	// Event-level ack must also suppress the "started" alert, unlike custom
 	// (10m, 30m, …) acks which only suppress that one specific reminder.
