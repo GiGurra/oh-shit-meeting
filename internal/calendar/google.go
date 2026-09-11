@@ -306,16 +306,20 @@ func ReAuthenticate() error {
 	if err != nil {
 		return err
 	}
-	if err := doBrowserAuth(oauthCfg); err != nil {
-		return err
-	}
-	cfg := loadAppConfig()
-	cfg.AuthenticatedAt = time.Now().Format(time.RFC3339)
-	cfg.Calendars = calendarSpec()
-	if err := saveAppConfig(cfg); err != nil {
-		slog.Warn("Could not save auth timestamp", "error", err)
-	}
-	return nil
+	return reAuthFlows.run(func(ctx context.Context) (*oauth2.Token, error) {
+		return browserAuthToken(ctx, oauthCfg, openBrowser)
+	}, func(tok *oauth2.Token) error {
+		if err := saveBrowserToken(tok); err != nil {
+			return err
+		}
+		cfg := loadAppConfig()
+		cfg.AuthenticatedAt = time.Now().Format(time.RFC3339)
+		cfg.Calendars = calendarSpec()
+		if err := saveAppConfig(cfg); err != nil {
+			return fmt.Errorf("save auth metadata: %w", err)
+		}
+		return nil
+	})
 }
 
 // Authenticate runs the OAuth2 authorization code flow using a credentials JSON file.
@@ -370,10 +374,19 @@ func AuthenticateWithClientIDSecret(clientID, clientSecret string) error {
 
 // doBrowserAuth runs the OAuth2 browser flow: opens browser, receives callback, exchanges token.
 func doBrowserAuth(oauthCfg *oauth2.Config) error {
+	tok, err := browserAuthToken(context.Background(), oauthCfg, openBrowser)
+	if err != nil {
+		return err
+	}
+	return saveBrowserToken(tok)
+}
+
+func browserAuthToken(ctx context.Context, oauthCfg *oauth2.Config, open func(string)) (*oauth2.Token, error) {
 	listener, err := net.Listen("tcp", "localhost:0")
 	if err != nil {
-		return fmt.Errorf("start callback listener: %w", err)
+		return nil, fmt.Errorf("start callback listener: %w", err)
 	}
+	defer listener.Close()
 	port := listener.Addr().(*net.TCPAddr).Port
 	oauthCfg.RedirectURL = fmt.Sprintf("http://localhost:%d/callback", port)
 
@@ -386,45 +399,60 @@ func doBrowserAuth(oauthCfg *oauth2.Config) error {
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
 		code := r.URL.Query().Get("code")
 		if code == "" {
-			errCh <- fmt.Errorf("no code in callback")
+			select {
+			case errCh <- fmt.Errorf("no code in callback"):
+			default:
+			}
 			fmt.Fprintln(w, "Error: no authorization code received.")
 			return
 		}
-		codeCh <- code
+		select {
+		case codeCh <- code:
+		default:
+		}
 		fmt.Fprintln(w, "Authorization successful! You can close this tab.")
 	})
 
 	srv := &http.Server{Handler: mux}
+	defer srv.Close()
 	go func() {
 		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
-			errCh <- err
+			select {
+			case errCh <- err:
+			default:
+			}
 		}
 	}()
 
 	fmt.Println("Opening browser for Google authorization...")
 	fmt.Printf("If the browser doesn't open, visit this URL:\n%s\n\n", authURL)
-	openBrowser(authURL)
+	open(authURL)
 
 	var code string
 	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	case code = <-codeCh:
 	case err := <-errCh:
 		srv.Close()
-		return fmt.Errorf("callback error: %w", err)
+		return nil, fmt.Errorf("callback error: %w", err)
 	case <-time.After(5 * time.Minute):
 		srv.Close()
-		return fmt.Errorf("timed out waiting for authorization (5 minutes)")
+		return nil, fmt.Errorf("timed out waiting for authorization (5 minutes)")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	srv.Shutdown(ctx)
 
 	tok, err := oauthCfg.Exchange(ctx, code)
 	if err != nil {
-		return fmt.Errorf("exchange token: %w", err)
+		return nil, fmt.Errorf("exchange token: %w", err)
 	}
 
+	return tok, nil
+}
+
+func saveBrowserToken(tok *oauth2.Token) error {
 	if err := saveToken(tok); err != nil {
 		return fmt.Errorf("save token: %w", err)
 	}
