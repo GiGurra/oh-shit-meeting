@@ -316,7 +316,7 @@ func ReAuthenticate() error {
 		cfg.AuthenticatedAt = time.Now().Format(time.RFC3339)
 		cfg.Calendars = calendarSpec()
 		if err := saveAppConfig(cfg); err != nil {
-			slog.Warn("Could not save auth timestamp", "error", err)
+			return fmt.Errorf("save auth metadata: %w", err)
 		}
 		return nil
 	})
