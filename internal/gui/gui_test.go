@@ -199,6 +199,45 @@ func TestTrayIconStatesAreDistinct22PixelPNGs(t *testing.T) {
 	}
 }
 
+func TestRefreshTrayIconFollowsAuthStatusChanges(t *testing.T) {
+	oldCfg, oldHealthy, oldAuth := cfg, healthyIcon, authIcon
+	t.Cleanup(func() {
+		cfg, healthyIcon, authIcon = oldCfg, oldHealthy, oldAuth
+		mu.Lock()
+		trayReady, alertActive, lastBaseIcon = false, false, nil
+		mu.Unlock()
+	})
+	healthyIcon = makeTrayIcon(trayHealthy)
+	authIcon = makeTrayIcon(trayAuthAttention)
+	status := AuthStatus{HasToken: true, ExpiresAt: time.Now().Add(-time.Minute)}
+	cfg = Config{AuthStatusFn: func() AuthStatus { return status }}
+	shown := func() []byte {
+		mu.Lock()
+		defer mu.Unlock()
+		return lastBaseIcon
+	}
+
+	RefreshTrayIcon()
+	if shown() != nil {
+		t.Fatal("icon set before tray was ready")
+	}
+
+	mu.Lock()
+	trayReady = true
+	mu.Unlock()
+	RefreshTrayIcon()
+	if !bytes.Equal(shown(), authIcon) {
+		t.Fatal("stale auth should show the auth-attention icon")
+	}
+
+	// A re-auth outside the tray/dashboard paths (e.g. at startup).
+	status.ExpiresAt = time.Now().Add(time.Hour)
+	RefreshTrayIcon()
+	if !bytes.Equal(shown(), healthyIcon) {
+		t.Fatal("fresh auth should show the healthy icon")
+	}
+}
+
 func TestTrayIconGlyphsCarryStateWithoutColor(t *testing.T) {
 	wantAt := func(state trayIconState, x, y int, want color.NRGBA) {
 		t.Helper()

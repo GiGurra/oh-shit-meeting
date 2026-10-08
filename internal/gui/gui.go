@@ -131,6 +131,8 @@ var (
 	alertAltIcon []byte
 	faviconIcon  = makeIconPNG(trayHealthy)
 	alertActive  bool // protected by mu; true while an alert is flashing
+	trayReady    bool // protected by mu; true once systray has called onReady
+	lastBaseIcon []byte
 )
 
 type trayIconState uint8
@@ -184,7 +186,10 @@ func Run() {
 }
 
 func onReady() {
-	systray.SetIcon(currentBaseIcon())
+	mu.Lock()
+	trayReady = true
+	mu.Unlock()
+	refreshBaseIcon()
 	systray.SetTitle("")
 	systray.SetTooltip("oh-shit-meeting — " + dashURL())
 
@@ -254,16 +259,29 @@ func currentBaseIcon() []byte {
 	return healthyIcon
 }
 
+// RefreshTrayIcon re-evaluates auth state and updates the tray icon. Callers
+// that change credentials outside the tray/dashboard re-auth paths (startup
+// stale-token re-auth, re-auth after a 401) use it so the icon doesn't lag
+// behind until the next periodic refresh. Safe to call from any goroutine,
+// including before the tray is ready.
+func RefreshTrayIcon() {
+	refreshBaseIcon()
+}
+
 // refreshBaseIcon updates the tray icon to the base (non-flashing) state if
 // no alert is currently flashing. Safe to call from any goroutine.
 func refreshBaseIcon() {
+	icon := currentBaseIcon()
 	mu.Lock()
-	flashing := alertActive
-	mu.Unlock()
-	if flashing {
+	defer mu.Unlock()
+	if !trayReady || alertActive {
 		return
 	}
-	systray.SetIcon(currentBaseIcon())
+	if !bytes.Equal(icon, lastBaseIcon) {
+		slog.Info("tray icon state changed", "authAttention", bytes.Equal(icon, authIcon))
+	}
+	lastBaseIcon = icon
+	systray.SetIcon(icon)
 }
 
 func dashURL() string {
@@ -311,7 +329,7 @@ func flashTray(done <-chan struct{}) {
 			mu.Lock()
 			alertActive = false
 			mu.Unlock()
-			systray.SetIcon(currentBaseIcon())
+			refreshBaseIcon()
 			return
 		case <-ticker.C:
 			if alternate {
