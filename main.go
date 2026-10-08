@@ -528,7 +528,11 @@ func runLoop(params *Params, store *eventStore, ackStore *ack.FileStore, finder 
 	// Poll calendar in a separate goroutine so slow/hung API calls
 	// never block the alert check loop.
 	go pollEvents(params.PollInterval, pollNow, nil, store, func() calendar.PollResult {
+		// Both the stale-token check and a 401 during the fetch may run a
+		// browser re-auth, so re-evaluate the tray icon after each step.
 		calendar.ReAuthIfStale()
+		gui.RefreshTrayIcon()
+		defer gui.RefreshTrayIcon()
 		return calendar.PollWithResult(params.Backend, params.LookaheadDays)
 	})
 
