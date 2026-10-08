@@ -160,6 +160,7 @@ jobs:
           cd dist
           for dir in */; do
             name="${dir%/}"
+            chmod +x "$dir"oh-shit-meeting*
             tar -czvf "${name}.tar.gz" "$dir"
           done
           sha256sum *.tar.gz > checksums.txt
@@ -174,3 +175,43 @@ jobs:
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  homebrew:
+    name: Update Homebrew tap
+    runs-on: ubuntu-latest
+    needs: [version, release]
+    steps:
+      - name: Check for the tap deploy key
+        id: key
+        env:
+          TAP_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+        run: |
+          if [ -z "$TAP_KEY" ]; then
+            echo 'Homebrew deploy key is absent; skipping tap update.'
+            echo 'enabled=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'enabled=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout tap
+        if: steps.key.outputs.enabled == 'true'
+        uses: actions/checkout@v7
+        with:
+          repository: GiGurra/homebrew-tap
+          ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+          path: tap
+
+      - name: Update formula
+        if: steps.key.outputs.enabled == 'true'
+        env:
+          VERSION: ${{ needs.version.outputs.new_version }}
+        run: |
+          set -eu
+          tap/scripts/update-oh-shit-meeting.sh "$VERSION"
+          git -C tap config user.name 'github-actions[bot]'
+          git -C tap config user.email 'github-actions[bot]@users.noreply.github.com'
+          git -C tap add Formula/oh-shit-meeting.rb
+          if ! git -C tap diff --cached --quiet; then
+            git -C tap commit -m "oh-shit-meeting $VERSION"
+            git -C tap push
+          fi

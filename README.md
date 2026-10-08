@@ -66,6 +66,16 @@ If you're running somewhere without a working keychain (common on WSL without `g
 
 ## Installation
 
+Homebrew (macOS arm64, Linux amd64/arm64):
+
+```bash
+brew install gigurra/tap/oh-shit-meeting
+```
+
+This also installs `oh-shit-meeting-bg`, a shell-agnostic launcher that starts the app detached and appends its output to `~/.oh-shit-meeting.log` (override with `OH_SHIT_MEETING_LOG`); arguments are passed through, e.g. `oh-shit-meeting-bg --fullscreen`.
+
+Or with Go:
+
 ```bash
 go install github.com/gigurra/oh-shit-meeting@latest
 ```
@@ -123,6 +133,9 @@ oh-shit-meeting list-events --backend=gws --json
 
 # Remove stored token (keychain + plaintext fallback)
 oh-shit-meeting logout
+
+# Run in background, logging to ~/.oh-shit-meeting.log (Homebrew install, any shell)
+oh-shit-meeting-bg --fullscreen
 
 # Run in background (fish shell)
 oh-shit-meeting &; disown
